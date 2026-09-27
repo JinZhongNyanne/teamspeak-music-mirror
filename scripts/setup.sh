@@ -21,7 +21,7 @@ echo ""
 
 # ---- Check Node.js ----
 if ! command -v node &>/dev/null; then
-    echo "[ERROR] Node.js not found. Please install Node.js 20+ from https://nodejs.org"
+    echo "[ERROR] Node.js not found. Please install Node.js 22.12+ LTS from https://nodejs.org"
     echo "        or https://nodejs.cn/ (China mirror)."
     exit 1
 fi
