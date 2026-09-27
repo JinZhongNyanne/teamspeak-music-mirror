@@ -1538,3 +1538,55 @@ describe("BotInstance live-queue persistence (#119)", () => {
     }
   });
 });
+
+describe("BotInstance Bilibili multi-P resolution", () => {
+  it("resolves multi-P search result to P1 with accurate duration and name", async () => {
+    const multiPSongDetail = {
+      id: "BV1multiP?p=1",
+      name: "测试视频 - P1 分P1",
+      artist: "UP主",
+      album: "",
+      duration: 100, // P1 duration
+      coverUrl: "",
+      platform: "bilibili" as const,
+    };
+    const mockBili = {
+      platform: "bilibili" as const,
+      search: vi.fn().mockResolvedValue({
+        songs: [{
+          id: "BV1multiP",
+          name: "测试视频",
+          artist: "UP主",
+          album: "",
+          duration: 300, // total duration in search
+          coverUrl: "",
+          platform: "bilibili",
+        }],
+        albums: [],
+        playlists: [],
+      }),
+      getSongDetail: vi.fn().mockResolvedValue(multiPSongDetail),
+      getSongUrl: vi.fn().mockResolvedValue({ url: "http://audio.test" }),
+    };
+
+    const ctx = {
+      config: { commandPrefix: "!" },
+      lastSearchResults: [] as any[],
+      getProvider: () => mockBili,
+      getProviderFor: () => mockBili,
+    };
+
+    const res = await (BotInstance.prototype as any).resolvePlayQuery.call(ctx, {
+      name: "play",
+      args: "测试视频",
+      rawArgs: ["测试视频"],
+      flags: new Set(),
+    });
+
+    expect(res.song).toBeDefined();
+    expect(res.song.id).toBe("BV1multiP?p=1");
+    expect(res.song.name).toBe("测试视频 - P1 分P1");
+    expect(res.song.duration).toBe(100);
+  });
+});
+

@@ -17,6 +17,24 @@ export interface Song {
 
 export type Source = 'jellyfin' | 'netease' | 'qq' | 'kugou' | 'spotify';
 
+export interface BiliPart {
+  part: number;
+  cid: number;
+  title: string;
+  duration: number;
+}
+
+export interface BiliPartModalState {
+  open: boolean;
+  song: Song | null;
+  action: 'play' | 'playNext' | 'add';
+  bvid: string;
+  title: string;
+  coverUrl: string;
+  artist: string;
+  parts: BiliPart[];
+}
+
 export interface AlbumItem {
   id: string;
   name: string;
@@ -138,6 +156,18 @@ export const usePlayerStore = defineStore('player', {
     // Transient notification for surfacing failures (e.g., "song not playable")
     // to a global Toast. Bumped `id` triggers re-render of the same message.
     notification: null as { id: number; message: string; type: 'error' | 'info' } | null,
+
+    // Bilibili 多P分P选择弹窗状态
+    biliPartModal: {
+      open: false,
+      song: null,
+      action: 'play',
+      bvid: '',
+      title: '',
+      coverUrl: '',
+      artist: '',
+      parts: [] as BiliPart[],
+    } as BiliPartModalState,
   }),
 
   getters: {
@@ -411,8 +441,74 @@ export const usePlayerStore = defineStore('player', {
       this.notification = { id: Date.now(), message, type };
     },
 
-    async playSong(song: Song) {
+    /**
+     * 检查 B站视频是否为多P，若为多P则弹窗询问，单P则直接修正时长并继续
+     */
+    async checkBilibiliMultiPart(song: Song, action: 'play' | 'playNext' | 'add'): Promise<boolean> {
+      try {
+        const cleanBvid = song.id.split('?')[0].split(':')[0];
+        const res = await axios.get('/api/music/bilibili/parts', { params: { bvid: cleanBvid } });
+        const parts: BiliPart[] = res.data?.parts ?? [];
+        if (parts.length > 1) {
+          this.biliPartModal = {
+            open: true,
+            song,
+            action,
+            bvid: cleanBvid,
+            title: res.data.title || song.name,
+            coverUrl: res.data.coverUrl || song.coverUrl,
+            artist: res.data.artist || song.artist,
+            parts,
+          };
+          return true; // 弹窗接管
+        }
+        if (parts.length === 1) {
+          song.duration = parts[0].duration;
+        }
+      } catch {
+        // 网络请求异常则降级为正常播放
+      }
+      return false;
+    },
+
+    selectBilibiliPart(part: BiliPart) {
+      if (!this.biliPartModal.open || !this.biliPartModal.song) return;
+      const { song, action, bvid, title, artist, coverUrl } = this.biliPartModal;
+      this.biliPartModal.open = false;
+
+      const partTitle = part.title && part.title !== title
+        ? `${title} - P${part.part} ${part.title}`
+        : `${title} (P${part.part})`;
+
+      const partSong: Song = {
+        ...song,
+        id: `${bvid}?p=${part.part}`,
+        name: partTitle,
+        artist: artist || song.artist,
+        coverUrl: coverUrl || song.coverUrl,
+        duration: part.duration,
+      };
+
+      if (action === 'play') {
+        this.playSong(partSong, true);
+      } else if (action === 'playNext') {
+        this.playNextSong(partSong, true);
+      } else if (action === 'add') {
+        this.addSong(partSong, true);
+      }
+    },
+
+    closeBilibiliPartModal() {
+      this.biliPartModal.open = false;
+      this.biliPartModal.song = null;
+    },
+
+    async playSong(song: Song, skipPartCheck = false) {
       if (!this.activeBotId) return;
+      if (!skipPartCheck && song.platform === 'bilibili' && !song.id.includes('?p=')) {
+        const handled = await this.checkBilibiliMultiPart(song, 'play');
+        if (handled) return;
+      }
       // Guests use the non-destructive "play now" (insert-next + skip) so they
       // can't wipe everyone else's queue; members/admins keep the normal behavior.
       const endpoint = useSession().isGuest.value ? 'play-now-song' : 'play-song';
@@ -424,8 +520,12 @@ export const usePlayerStore = defineStore('player', {
       this._syncAfterAction();
     },
 
-    async playNextSong(song: Song) {
+    async playNextSong(song: Song, skipPartCheck = false) {
       if (!this.activeBotId) return;
+      if (!skipPartCheck && song.platform === 'bilibili' && !song.id.includes('?p=')) {
+        const handled = await this.checkBilibiliMultiPart(song, 'playNext');
+        if (handled) return;
+      }
       const res = await axios.post(`/api/player/${this.activeBotId}/play-next-song`, { song });
       if (res.data?.message) {
         this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
@@ -444,8 +544,12 @@ export const usePlayerStore = defineStore('player', {
       await axios.post(`/api/player/${this.activeBotId}/add-by-id`, { songId, platform });
     },
 
-    async addSong(song: Song) {
+    async addSong(song: Song, skipPartCheck = false) {
       if (!this.activeBotId) return;
+      if (!skipPartCheck && song.platform === 'bilibili' && !song.id.includes('?p=')) {
+        const handled = await this.checkBilibiliMultiPart(song, 'add');
+        if (handled) return;
+      }
       await axios.post(`/api/player/${this.activeBotId}/add-song`, { song });
     },
 

@@ -968,6 +968,14 @@ export class BotInstance extends EventEmitter {
     this.voteSkipUsers.clear();
     const provider = this.getProviderFor(song.platform);
     try {
+      if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
+        const detail = await provider.getSongDetail(song.id);
+        if (detail) {
+          song.duration = detail.duration;
+          song.name = detail.name;
+          song.id = detail.id;
+        }
+      }
       const result = await provider.getSongUrl(song.id);
       if (!result?.url) {
         this.logger.warn({ songId: song.id, name: song.name }, "No URL available, skipping");
@@ -1134,7 +1142,12 @@ export class BotInstance extends EventEmitter {
         return { error: `No recent search. Use ${p}search <name> first.` };
       if (sel > this.lastSearchResults.length)
         return { error: `Invalid selection #${sel}. ${p}search returned ${this.lastSearchResults.length} results.` };
-      return { song: this.lastSearchResults[sel - 1] };
+      let song = this.lastSearchResults[sel - 1];
+      if (song.platform === "bilibili") {
+        const detail = await this.getProviderFor("bilibili").getSongDetail(song.id);
+        if (detail) song = { ...detail, platform: "bilibili" };
+      }
+      return { song };
     }
 
     // 2) id/URL — fetch that exact song.
@@ -1151,7 +1164,12 @@ export class BotInstance extends EventEmitter {
     const provider = this.getProvider(cmd.flags);
     const result = await provider.search(args, 1);
     if (result.songs.length === 0) return { error: `No results found for: ${args}` };
-    return { song: { ...result.songs[0], platform: provider.platform } };
+    let song = result.songs[0];
+    if (provider.platform === "bilibili") {
+      const detail = await provider.getSongDetail(song.id);
+      if (detail) song = detail;
+    }
+    return { song: { ...song, platform: provider.platform } };
   }
 
   private async cmdSearch(cmd: ParsedCommand): Promise<string> {
