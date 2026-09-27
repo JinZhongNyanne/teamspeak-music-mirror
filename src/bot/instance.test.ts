@@ -1590,3 +1590,70 @@ describe("BotInstance Bilibili multi-P resolution", () => {
   });
 });
 
+
+describe("cmdPlaylist with a playlist link (#160)", () => {
+  const cmdPlaylist = (BotInstance.prototype as any).cmdPlaylist as (
+    this: unknown, cmd: { name: string; args: string; rawArgs: string[]; flags: Set<string> },
+  ) => Promise<string>;
+
+  function makeCtx() {
+    const song = { id: "s1", name: "Song", artist: "A", album: "B", duration: 1, coverUrl: "" };
+    const makeProvider = (platform: string) => ({
+      platform,
+      search: vi.fn().mockResolvedValue({ songs: [], playlists: [] }),
+      getPlaylistSongs: vi.fn().mockResolvedValue([song]),
+    });
+    const providers: Record<string, any> = {
+      netease: makeProvider("netease"),
+      qq: makeProvider("qq"),
+      youtube: makeProvider("youtube"),
+    };
+    const queued: any[] = [];
+    return {
+      providers,
+      queued,
+      getProvider: vi.fn(() => providers.netease),
+      getProviderFor: vi.fn((p: string) => providers[p]),
+      assertProviderEnabled: vi.fn(),
+      extractId: (BotInstance.prototype as any).extractId,
+      looksLikeCollectionId: (BotInstance.prototype as any).looksLikeCollectionId,
+      player: { stop: vi.fn() },
+      queue: { clear: vi.fn(), add: (s: any) => queued.push(s), play: () => queued[0] },
+      disableFmMode: vi.fn(),
+      withRequester: (s: any) => s,
+      resolveAndPlay: vi.fn(async () => true),
+      sweepLocalAudio: vi.fn(),
+      emit: vi.fn(),
+    };
+  }
+  const cmd = (args: string, flags: string[] = []) =>
+    ({ name: "playlist", args, rawArgs: args.split(" "), flags: new Set(flags) });
+
+  it("routes a QQ playlist link to QQ even without -q (default is NetEase)", async () => {
+    const ctx = makeCtx();
+    const reply = await cmdPlaylist.call(ctx, cmd("[URL]https://y.qq.com/n/ryqq/playlist/8052190267[/URL]"));
+    expect(ctx.providers.qq.getPlaylistSongs).toHaveBeenCalledWith("8052190267");
+    expect(ctx.providers.netease.getPlaylistSongs).not.toHaveBeenCalled();
+    expect(ctx.queued[0].platform).toBe("qq");
+    expect(reply).toMatch(/^Loaded 1 songs/);
+  });
+
+  it("loads a YouTube playlist link by its list id instead of name-searching the URL", async () => {
+    const ctx = makeCtx();
+    await cmdPlaylist.call(ctx, cmd("https://www.youtube.com/playlist?list=PLabc123"));
+    expect(ctx.providers.youtube.getPlaylistSongs).toHaveBeenCalledWith("PLabc123");
+    expect(ctx.providers.netease.search).not.toHaveBeenCalled();
+  });
+
+  it("checks the link's platform is enabled", async () => {
+    const ctx = makeCtx();
+    ctx.assertProviderEnabled.mockImplementation(() => { throw new Error("音源未启用：qq"); });
+    await expect(cmdPlaylist.call(ctx, cmd("https://y.qq.com/n/ryqq/playlist/1"))).rejects.toThrow("音源未启用");
+  });
+
+  it("keeps the old behavior for a bare id", async () => {
+    const ctx = makeCtx();
+    await cmdPlaylist.call(ctx, cmd("2829883282"));
+    expect(ctx.providers.netease.getPlaylistSongs).toHaveBeenCalledWith("2829883282");
+  });
+});
