@@ -32,6 +32,13 @@ export class BotProfileManager {
    * pushed immediately (idle) or wait for the next stop event (playing).
    */
   private currentSong: QueuedSong | null = null;
+  /**
+   * Channel whose description currently holds our now-playing text, or null
+   * if we have not written one. Remembered so that when the bot is moved we
+   * can still clean up the channel it was taken out of (#159) — by then
+   * getChannelId() already reports the new channel.
+   */
+  private channelDescCid: bigint | null = null;
 
   /** Per-feature permission-denied flags. Reset on reconnect. */
   private permDenied = {
@@ -134,6 +141,8 @@ export class BotProfileManager {
   onConnect(): void {
     this.generation++;
     this.currentSong = null;
+    // Channel ids are per-server; never carry one across a (re)connect.
+    this.channelDescCid = null;
     this.permDenied = {
       avatar: false,
       description: false,
@@ -147,6 +156,31 @@ export class BotProfileManager {
     if (this.customAvatar) {
       const gen = this.generation;
       void this.applyIdleAvatar(gen);
+    }
+  }
+
+  /**
+   * Called when the bot itself has been moved to another channel (#159).
+   * Clears the now-playing text from the channel it left and, if a song is
+   * playing, writes it to the channel it is in now.
+   */
+  async onChannelMoved(newChannelId: bigint): Promise<void> {
+    if (!this.config.channelDescEnabled || this.permDenied.channelDesc) return;
+    const oldChannelId = this.channelDescCid;
+    if (oldChannelId === newChannelId) return;
+    try {
+      if (oldChannelId !== null) {
+        await this.tsClient.sendCommandNoWait(
+          `channeledit cid=${oldChannelId} channel_description=`,
+        );
+        this.channelDescCid = null;
+      }
+    } catch (err) {
+      this.handleFeatureError("channelDesc", err);
+      return;
+    }
+    if (this.currentSong) {
+      await this.updateChannelDescription(this.currentSong, newChannelId);
     }
   }
 
@@ -400,18 +434,25 @@ export class BotProfileManager {
     return str.slice(0, end) + ellipsis;
   }
 
-  private async updateChannelDescription(song: QueuedSong | null): Promise<void> {
+  private async updateChannelDescription(
+    song: QueuedSong | null,
+    targetChannelId?: bigint,
+  ): Promise<void> {
     if (!this.config.channelDescEnabled || this.permDenied.channelDesc) return;
     try {
-      const channelId = this.tsClient.getChannelId();
-      if (channelId === 0n) return; // unknown channel
-
+      const channelId = targetChannelId ?? this.tsClient.getChannelId();
       if (!song) {
+        // Prefer the channel we actually wrote to, in case a move event
+        // was missed and the bot is somewhere else now.
+        const target = this.channelDescCid ?? channelId;
+        if (target === 0n) return; // unknown channel
         await this.tsClient.sendCommandNoWait(
-          `channeledit cid=${channelId} channel_description=`,
+          `channeledit cid=${target} channel_description=`,
         );
+        this.channelDescCid = null;
         return;
       }
+      if (channelId === 0n) return; // unknown channel
 
       const lines = [
         `\u266A \u6B63\u5728\u64AD\u653E: ${song.name} - ${song.artist}`, // ♪ 正在播放:
@@ -422,6 +463,7 @@ export class BotProfileManager {
       await this.tsClient.sendCommandNoWait(
         `channeledit cid=${channelId} channel_description=${escapeTS3(desc)}`,
       );
+      this.channelDescCid = channelId;
     } catch (err) {
       this.handleFeatureError("channelDesc", err);
     }

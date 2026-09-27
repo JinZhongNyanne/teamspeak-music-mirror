@@ -456,11 +456,16 @@ export class BotInstance extends EventEmitter {
       this.voiceDucking.removeSpeaker(event.id);
       void this.refreshOccupancy();
     });
-    this.tsClient.on("clientMoved", (event: { id: number }) => {
+    this.tsClient.on("clientMoved", (event: { id: number; targetChannelID: bigint }) => {
       if (event.id === this.tsClient.getClientId()) {
         // Moving the bot invalidates every activity deadline from its old
         // channel even if no individual leave events arrive.
         this.voiceDucking.reset(false);
+        // Carry the now-playing channel description over to the new
+        // channel instead of leaving it stale in the old one (#159).
+        this.profileManager.onChannelMoved(event.targetChannelID).catch((err) => {
+          this.logger.warn({ err }, "Channel description move update failed");
+        });
       } else {
         this.voiceDucking.removeSpeaker(event.id);
       }

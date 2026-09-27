@@ -202,3 +202,65 @@ describe("BotProfileManager loadCustomAvatar (pre-connect load, #148)", () => {
     expect(ts.uploadCalls[0].equals(Buffer.from([2, 2]))).toBe(true);
   });
 });
+
+describe("BotProfileManager channel description follows the bot (#159)", () => {
+  const cfgChannelDesc = { ...cfgOff, channelDescEnabled: true };
+  let ts: ReturnType<typeof makeMockTs> & { cid: bigint };
+  let channelEdits: () => string[];
+
+  beforeEach(() => {
+    ts = makeMockTs() as any;
+    ts.cid = 5n;
+    (ts as any).getChannelId = () => ts.cid;
+    channelEdits = () =>
+      (ts.sendCommandNoWait as any).mock.calls
+        .map((c: any[]) => c[0] as string)
+        .filter((cmd: string) => cmd.startsWith("channeledit"));
+  });
+
+  it("clears the old channel and fills the new one when moved while playing", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgChannelDesc, "Bot");
+    await pm.onSongChange(fakeSong);
+    expect(channelEdits()).toEqual([
+      expect.stringMatching(/^channeledit cid=5 channel_description=\S+/),
+    ]);
+
+    ts.cid = 9n;
+    await pm.onChannelMoved(9n);
+
+    const edits = channelEdits();
+    expect(edits[1]).toBe("channeledit cid=5 channel_description=");
+    expect(edits[2]).toMatch(/^channeledit cid=9 channel_description=\S+/);
+  });
+
+  it("stopping after a move clears the channel the bot is in now, not the old one", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgChannelDesc, "Bot");
+    await pm.onSongChange(fakeSong);
+    ts.cid = 9n;
+    await pm.onChannelMoved(9n);
+    await pm.onSongChange(null);
+    expect(channelEdits().at(-1)).toBe("channeledit cid=9 channel_description=");
+  });
+
+  it("a move while idle touches no channel description", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgChannelDesc, "Bot");
+    ts.cid = 9n;
+    await pm.onChannelMoved(9n);
+    expect(channelEdits()).toEqual([]);
+  });
+
+  it("a move is ignored when the channel description feature is off", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgOff, "Bot");
+    await pm.onSongChange(fakeSong);
+    ts.cid = 9n;
+    await pm.onChannelMoved(9n);
+    expect(channelEdits()).toEqual([]);
+  });
+
+  it("an event for the channel the description is already in is a no-op", async () => {
+    const pm = new BotProfileManager(ts as any, noopLogger, cfgChannelDesc, "Bot");
+    await pm.onSongChange(fakeSong);
+    await pm.onChannelMoved(5n);
+    expect(channelEdits()).toHaveLength(1);
+  });
+});
