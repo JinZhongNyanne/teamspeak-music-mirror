@@ -364,6 +364,7 @@ sudo systemctl start tsmusicbot
 | `!mode <seq\|loop\|random\|rloop>` | 切换播放模式 |
 | `!playlist <歌单名或ID>` | 加载歌单（支持名称模糊搜索和 ID；Jellyfin 歌单 GUID 也可直接粘贴） |
 | `!playlist -q <歌单名>` | 从 QQ 音乐搜索并加载歌单 |
+| `!playlist <歌单链接>` | 直接粘贴网易云 / QQ 音乐 / YouTube 歌单链接加载，平台由链接自动识别，无需加 `-q` 等标志；也可直接粘贴 App 的分享文案或短链（`163cn.tv`、`c6.y.qq.com`） |
 | `!album <专辑名或ID>` | 加载专辑（支持名称搜索 / 数字 ID / Jellyfin GUID） |
 | `!artist <歌手名>` | 按歌手循环播放（支持 `-j`/`-n`/`-q`/`-k`/`-b`/`-y`） |
 | `!fm` | 私人 FM（默认网易云，自动续播） |
