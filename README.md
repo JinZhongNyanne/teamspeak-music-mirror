@@ -136,14 +136,35 @@ ports:
 
 </details>
 
-### 方式四：Linux 一键安装
+### 方式四：Linux 安装脚本
+
+Linux 下有两个脚本，按需二选一：
+
+| | `scripts/install.sh`（一键安装 + 系统服务） | `scripts/setup.sh`（只安装构建） |
+|---|---|---|
+| 适合 | 想开箱即用、开机自启的服务器 | 想自己决定怎么常驻（screen / tmux / pm2 / 自写服务）的用户，或 macOS |
+| Node.js | 没有或版本过低时**自动安装 Node 22 LTS**（apt / yum / pacman） | **不会安装**，需先自行装好 Node 22.12+ |
+| 系统依赖 | 自动安装构建工具（和 FFmpeg，作为内置 FFmpeg 的后备） | 不安装，只提示 |
+| 安装位置 | 构建后复制到 `/opt/tsmusicbot`（重装时保留 `data/`） | 就在当前项目目录 |
+| 系统服务 | 自动配置 systemd 服务 `tsmusicbot` 并开机自启 | **不配置服务**，完成后自己 `npm start` |
+| 需要 root | 是（`sudo`） | 否 |
+
+两者共用同一套安装逻辑：`install.sh` 会调用 `setup.sh` 完成依赖安装、国内网络镜像切换、原生模块校验和构建，然后再复制文件、配置服务。
+
+**一键安装 + systemd 服务：**
 
 ```bash
 chmod +x scripts/install.sh
 sudo ./scripts/install.sh
+# 之后：systemctl status|restart|stop tsmusicbot，日志：journalctl -u tsmusicbot -f
 ```
 
-自动安装 Node.js 和依赖，配置 systemd 服务，支持开机自启。
+**只安装构建（不装 Node、不配服务）：**
+
+```bash
+bash scripts/setup.sh
+npm start
+```
 
 ## 更新升级
 
@@ -495,6 +516,7 @@ teamspeak-music-bot/
 ├── scripts/                    # 部署脚本
 │   ├── setup.bat               # Windows 首次安装
 │   ├── start.bat               # Windows 启动脚本
+│   ├── setup.sh                # Linux/macOS 首次安装（只安装构建）
 │   ├── install.sh              # Linux 一键安装 + systemd 服务
 │   └── docker/                 # Docker 部署文件
 │       ├── Dockerfile
