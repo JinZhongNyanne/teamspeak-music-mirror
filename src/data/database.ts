@@ -144,6 +144,10 @@ export interface BotDatabase {
   removeFavorite(userId: string, playlistId: string, platform: string): boolean;
   getFavorites(userId: string): FavoritePlaylist[];
   isFavorited(userId: string, playlistId: string, platform: string): boolean;
+  // Per-user music account cookies (#164).
+  getUserMusicCookie(userId: string, platform: string): string | null;
+  setUserMusicCookie(userId: string, platform: string, cookie: string): void;
+  deleteUserMusicCookie(userId: string, platform: string): boolean;
   // Saved queues (Feature 1) — upsert by (ownerId, name), capped.
   saveQueue(ownerId: string, name: string, songs: StoredSong[]): SavedQueue;
   listSavedQueues(ownerId: string, includeShared: boolean): SavedQueueMeta[];
@@ -328,6 +332,17 @@ function initTables(db: Database.Database): void {
       fmPlatform   TEXT NOT NULL DEFAULT '',
       updatedAt    TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- A web user's own music-platform login (#164), used for their personal
+    -- FM instead of the bot's shared account. Secret: never sent to clients.
+    CREATE TABLE IF NOT EXISTS user_music_cookies (
+      userId    TEXT NOT NULL,
+      platform  TEXT NOT NULL,
+      cookie    TEXT NOT NULL,
+      updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (userId, platform),
+      FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE
+    );
   `);
 }
 
@@ -452,6 +467,17 @@ export function createDatabase(dbPath: string): BotDatabase {
   const checkFavorited = db.prepare(`
     SELECT 1 FROM favorite_playlists WHERE userId = ? AND playlistId = ? AND platform = ?
   `);
+
+  const selectUserMusicCookie = db.prepare(
+    `SELECT cookie FROM user_music_cookies WHERE userId = ? AND platform = ?`,
+  );
+  const upsertUserMusicCookie = db.prepare(`
+    INSERT INTO user_music_cookies (userId, platform, cookie) VALUES (?, ?, ?)
+    ON CONFLICT(userId, platform) DO UPDATE SET cookie = excluded.cookie, updatedAt = datetime('now')
+  `);
+  const deleteUserMusicCookieStmt = db.prepare(
+    `DELETE FROM user_music_cookies WHERE userId = ? AND platform = ?`,
+  );
 
   // A corrupt/hand-edited songs blob must never throw into a route or the
   // restore path — degrade to an empty list instead.
@@ -632,6 +658,19 @@ export function createDatabase(dbPath: string): BotDatabase {
     isFavorited(userId, playlistId, platform) {
       const row = checkFavorited.get(userId, playlistId, platform);
       return row !== undefined;
+    },
+
+    getUserMusicCookie(userId, platform) {
+      const row = selectUserMusicCookie.get(userId, platform) as { cookie: string } | undefined;
+      return row?.cookie ?? null;
+    },
+
+    setUserMusicCookie(userId, platform, cookie) {
+      upsertUserMusicCookie.run(userId, platform, cookie);
+    },
+
+    deleteUserMusicCookie(userId, platform) {
+      return deleteUserMusicCookieStmt.run(userId, platform).changes > 0;
     },
 
     saveQueue(ownerId, name, songs) {

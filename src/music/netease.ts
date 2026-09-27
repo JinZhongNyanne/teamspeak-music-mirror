@@ -111,8 +111,10 @@ export class NeteaseProvider implements MusicProvider {
   private api: AxiosInstance;
   private cookie = "";
   private quality = "exhigh";
+  private readonly baseUrl: string;
 
   constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
     this.api = axios.create({
       baseURL: baseUrl,
       timeout: 10000,
@@ -243,23 +245,45 @@ export class NeteaseProvider implements MusicProvider {
   async checkQrCodeStatus(
     key: string
   ): Promise<"waiting" | "scanned" | "confirmed" | "expired"> {
+    const { status, cookie } = await this.pollQrLogin(key);
+    if (cookie) this.cookie = cookie;
+    return status;
+  }
+
+  /**
+   * Poll a QR login and hand back the resulting cookie WITHOUT storing it on
+   * this provider — for a web user linking their own account (#164), which
+   * must never replace the bot's shared login.
+   */
+  async pollQrLogin(
+    key: string
+  ): Promise<{ status: "waiting" | "scanned" | "confirmed" | "expired"; cookie?: string }> {
     const res = await this.api.get("/login/qr/check", {
       params: { key, timestamp: Date.now() },
     });
-    const code = res.data?.code;
-    switch (code) {
+    switch (res.data?.code) {
       case 801:
-        return "waiting";
+        return { status: "waiting" };
       case 802:
-        return "scanned";
+        return { status: "scanned" };
       case 803:
-        if (res.data?.cookie) {
-          this.cookie = res.data.cookie;
-        }
-        return "confirmed";
+        return res.data?.cookie
+          ? { status: "confirmed", cookie: res.data.cookie }
+          : { status: "confirmed" };
       default:
-        return "expired";
+        return { status: "expired" };
     }
+  }
+
+  /**
+   * A provider for the same API server logged in as another account (#164):
+   * a web user's personal FM uses their own taste instead of the shared login.
+   */
+  withCookie(cookie: string): NeteaseProvider {
+    const view = new NeteaseProvider(this.baseUrl);
+    view.setQuality(this.quality);
+    view.setCookie(cookie);
+    return view;
   }
 
   async sendSmsCode(phone: string): Promise<boolean> {
