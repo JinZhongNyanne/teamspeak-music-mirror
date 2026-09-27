@@ -139,3 +139,48 @@ describe("NeteaseProvider.search pagination", () => {
     expect(callByType(get, 10).offset).toBe(0);
   });
 });
+
+describe("NeteaseProvider per-user login (#164)", () => {
+  function withGet(p: NeteaseProvider, impl: (path: string, cfg: any) => any) {
+    const get = vi.fn(async (path: string, cfg: any) => ({ data: impl(path, cfg) }));
+    (p as any).api = { get, defaults: { baseURL: "http://127.0.0.1:3001" } };
+    return get;
+  }
+
+  it("pollQrLogin returns the cookie without touching the shared account", async () => {
+    const p = new NeteaseProvider("http://127.0.0.1:3001");
+    p.setCookie("MUSIC_U=shared");
+    withGet(p, () => ({ code: 803, cookie: "MUSIC_U=personal" }));
+    expect(await p.pollQrLogin("k")).toEqual({ status: "confirmed", cookie: "MUSIC_U=personal" });
+    expect(p.getCookie()).toBe("MUSIC_U=shared");
+  });
+
+  it("pollQrLogin maps the waiting / scanned / expired codes", async () => {
+    const p = new NeteaseProvider("http://127.0.0.1:3001");
+    let code = 801;
+    withGet(p, () => ({ code }));
+    expect(await p.pollQrLogin("k")).toEqual({ status: "waiting" });
+    code = 802;
+    expect(await p.pollQrLogin("k")).toEqual({ status: "scanned" });
+    code = 800;
+    expect(await p.pollQrLogin("k")).toEqual({ status: "expired" });
+  });
+
+  it("checkQrCodeStatus still stores the cookie on the shared provider (admin login)", async () => {
+    const p = new NeteaseProvider("http://127.0.0.1:3001");
+    withGet(p, () => ({ code: 803, cookie: "MUSIC_U=admin" }));
+    expect(await p.checkQrCodeStatus("k")).toBe("confirmed");
+    expect(p.getCookie()).toBe("MUSIC_U=admin");
+  });
+
+  it("withCookie gives a view that fetches FM with the other account's cookie", async () => {
+    const p = new NeteaseProvider("http://127.0.0.1:3001");
+    p.setCookie("MUSIC_U=shared");
+    const personal = p.withCookie("MUSIC_U=personal");
+    const get = withGet(personal, () => ({ data: [] }));
+    await personal.getPersonalFm();
+    expect(get.mock.calls[0][1].params.cookie).toBe("MUSIC_U=personal");
+    expect(p.getCookie()).toBe("MUSIC_U=shared");
+    expect(personal.platform).toBe("netease");
+  });
+});

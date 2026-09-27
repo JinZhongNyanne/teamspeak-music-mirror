@@ -19,6 +19,7 @@ import { createUsersRouter } from "./api/users.js";
 import { createAuditStore } from "../data/audit.js";
 import { createAuditRouter } from "./api/audit.js";
 import { createFavoritesRouter } from "./api/favorites.js";
+import { createPersonalMusicRouter } from "./api/personal-music.js";
 import { createSavedQueuesRouter } from "./api/saved-queues.js";
 import { createSpotifyRouter } from "./api/spotify.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
@@ -203,6 +204,13 @@ export function createWebServer(options: WebServerOptions): WebServer {
     );
   }
   app.use("/api/favorites", requireNotGuest, createFavoritesRouter(options.database, logger));
+  // The caller's own NetEase login for their personal FM (#164). Guests share
+  // one anonymous identity, so they cannot link an account.
+  app.use(
+    "/api/me/music",
+    requireNotGuest,
+    createPersonalMusicRouter(options.database, options.neteaseProvider, logger),
+  );
   // Saved queues (Feature 1, #119). Members + admins only (requireNotGuest);
   // the router itself 403s every route unless savedQueuesEnabled is on.
   app.use(

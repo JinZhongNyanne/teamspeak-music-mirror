@@ -6,6 +6,7 @@ import type { Logger } from "../../logger.js";
 import { parseCommand } from "../../bot/commands.js";
 import { requireBotAccess } from "../middleware/requirePermission.js";
 import { authorize } from "../middleware/authorize.js";
+import { supportsPersonalLogin } from "./personal-music.js";
 
 export function createPlayerRouter(
   botManager: BotManager,
@@ -124,11 +125,19 @@ export function createPlayerRouter(
         rejectDisabledLocalAudio(res);
         return;
       }
-      const provider = bot.getProviderFor(
+      let provider = bot.getProviderFor(
         platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin"
           ? platform
           : "netease"
       );
+      // A signed-in user who linked their own NetEase account gets FM from
+      // THEIR taste, not the bot's shared login (#164). Songs still resolve
+      // through the shared provider when played.
+      const user = (req as any).user;
+      if (provider.platform === "netease" && user && user.role !== "guest" && database) {
+        const cookie = database.getUserMusicCookie(user.id, "netease");
+        if (cookie && supportsPersonalLogin(provider)) provider = provider.withCookie(cookie);
+      }
       const message = await bot.startFm(provider, requesterName(req));
       res.json({
         ok:
