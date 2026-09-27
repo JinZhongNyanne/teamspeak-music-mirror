@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { BiliBiliProvider } from "./bilibili.js";
+import { BiliBiliProvider, pickStableAudioUrl } from "./bilibili.js";
 
 describe("BiliBiliProvider.search pagination", () => {
   function mockProvider() {
@@ -160,5 +160,46 @@ describe("BiliBiliProvider multi-P support", () => {
     expect(playurlCall).toBeTruthy();
     expect(playurlCall![1].params.cid).toBe(10002); // 准确传入 P2 的 cid
     expect(playurlCall![1].params.bvid).toBe("BV1multiP"); // 纯净 bvid
+  });
+});
+
+describe("pickStableAudioUrl (#161 long streams dying mid-play)", () => {
+  const pcdn = "https://xy1x2x3x4xy.mcdn.bilivideo.cn:4483/upgcxcode/1/2/3/3-1-30280.m4s?e=x&deadline=1";
+  const szbdyd = "https://cn-hk-eq-01-01.szbdyd.com/upgcxcode/1/2/3/3-1-30280.m4s?deadline=1";
+  const upos = "https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/1/2/3/3-1-30280.m4s?deadline=1";
+  const upos2 = "https://upos-sz-mirror08c.bilivideo.com/upgcxcode/1/2/3/3-1-30280.m4s?deadline=1";
+
+  it("prefers an upos/cos mirror over a PCDN baseUrl", () => {
+    expect(pickStableAudioUrl({ baseUrl: pcdn, backupUrl: [szbdyd, upos] })).toBe(upos);
+  });
+
+  it("keeps the baseUrl when it is already a stable host", () => {
+    expect(pickStableAudioUrl({ baseUrl: upos, backupUrl: [upos2] })).toBe(upos);
+  });
+
+  it("accepts the snake_case field names", () => {
+    expect(pickStableAudioUrl({ base_url: pcdn, backup_url: [upos2] })).toBe(upos2);
+  });
+
+  it("falls back to the baseUrl when every candidate is PCDN", () => {
+    expect(pickStableAudioUrl({ baseUrl: pcdn, backupUrl: [szbdyd] })).toBe(pcdn);
+  });
+
+  it("returns undefined when there is no url at all", () => {
+    expect(pickStableAudioUrl({})).toBeUndefined();
+  });
+
+  it("getSongUrl returns the stable mirror of the best stream", async () => {
+    const p = new BiliBiliProvider();
+    (p as any).cidCache.set("BV1abc", 42);
+    (p as any).api = {
+      get: vi.fn().mockResolvedValue({
+        data: { data: { dash: { audio: [
+          { bandwidth: 64000, baseUrl: "https://upos-sz-mirrorcos.bilivideo.com/low.m4s" },
+          { bandwidth: 320000, baseUrl: pcdn, backupUrl: [upos] },
+        ] } } },
+      }),
+    };
+    expect((await p.getSongUrl("BV1abc"))?.url).toBe(upos);
   });
 });

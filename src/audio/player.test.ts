@@ -64,6 +64,14 @@ describe("buildFfmpegArgs", () => {
     expect(ssIdx).toBeGreaterThan(iIdx);
   });
 
+  it("seeks B站 streams input-side (before -i) so a resume jumps via Range instead of re-downloading (#161)", () => {
+    const args = buildFfmpegArgs("https://upos-sz-mirrorcos.bilivideo.com/audio.m4s", 3600);
+    const ssIdx = args.indexOf("-ss");
+    expect(args[ssIdx + 1]).toBe("3600");
+    expect(ssIdx).toBeLessThan(args.indexOf("-i"));
+    expect(args.lastIndexOf("-ss")).toBe(ssIdx); // only one -ss
+  });
+
   it("does not insert -ss when seekSeconds is 0", () => {
     const args = buildFfmpegArgs("https://example.com/song.mp3", 0);
     expect(args).not.toContain("-ss");

@@ -76,8 +76,9 @@ export function cleanupTempDir(dir: string): void {
 export function buildFfmpegArgs(url: string, seekSeconds: number): string[] {
   const args: string[] = [];
   const isHttp = /^https?:\/\//i.test(url);
+  const isBilibili = isHttp && (url.includes("bilivideo") || url.includes("bilibili"));
 
-  if (isHttp && (url.includes("bilivideo") || url.includes("bilibili"))) {
+  if (isBilibili) {
     args.push(
       "-headers",
       `Referer: https://www.bilibili.com\r\nUser-Agent: ${BROWSER_UA}\r\n`,
@@ -103,9 +104,15 @@ export function buildFfmpegArgs(url: string, seekSeconds: number): string[] {
       "-reconnect_on_http_error", "4xx,5xx",
     );
   }
+  // B站's CDN serves Range requests, so seek input-side: FFmpeg jumps straight
+  // to the byte offset. Output-side seek would download and decode everything
+  // before the target first — minutes for a resume deep into a 3-hour video
+  // (#161), long enough to trip the stall watchdog.
+  const inputSideSeek = isBilibili;
+  if (seekSeconds > 0 && inputSideSeek) args.push("-ss", String(seekSeconds));
   args.push("-i", url);
   // Output-side seek (after -i): works on CDNs that reject Range/keyframe seeks (NetEase music.126.net).
-  if (seekSeconds > 0) args.push("-ss", String(seekSeconds));
+  if (seekSeconds > 0 && !inputSideSeek) args.push("-ss", String(seekSeconds));
   args.push("-f", "s16le", "-ar", "48000", "-ac", "2", "-acodec", "pcm_s16le", "-");
 
   return args;

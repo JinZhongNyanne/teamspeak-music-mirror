@@ -1590,3 +1590,97 @@ describe("BotInstance Bilibili multi-P resolution", () => {
   });
 });
 
+
+describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", () => {
+  const resumeInterruptedStream = (BotInstance.prototype as any).resumeInterruptedStream as (
+    this: unknown,
+  ) => Promise<boolean>;
+
+  function makeCtx(opts: { platform?: string; elapsed?: number; duration?: number; url?: string | null } = {}) {
+    const song: any = {
+      id: "BV1abc", name: "Long", artist: "A", album: "", coverUrl: "",
+      platform: opts.platform ?? "bilibili", duration: opts.duration ?? 10_000, url: "old",
+    };
+    let elapsed = opts.elapsed ?? 1000;
+    let state: "idle" | "playing" = "idle";
+    const provider = {
+      getSongUrl: vi.fn(async () => (opts.url === null ? null : { url: opts.url ?? "https://fresh.test/a.m4s" })),
+    };
+    const ctx: any = {
+      song,
+      provider,
+      connected: true,
+      effectiveDuration: song.duration,
+      streamRecovery: null,
+      queue: { current: vi.fn(() => song) },
+      player: {
+        getElapsed: vi.fn(() => elapsed),
+        getState: vi.fn(() => state),
+        play: vi.fn(() => { state = "playing"; }),
+      },
+      getProviderFor: vi.fn(() => provider),
+      logger: { warn: vi.fn(), info: vi.fn() },
+      emit: vi.fn(),
+      setElapsed: (v: number) => { elapsed = v; state = "idle"; },
+    };
+    return ctx;
+  }
+
+  it("re-resolves the URL and resumes at the current position when a B站 stream ends early", async () => {
+    const ctx = makeCtx({ elapsed: 1000, duration: 10_000 });
+    expect(await resumeInterruptedStream.call(ctx)).toBe(true);
+    expect(ctx.provider.getSongUrl).toHaveBeenCalledWith("BV1abc");
+    expect(ctx.player.play).toHaveBeenCalledWith("https://fresh.test/a.m4s", 1000, 10_000);
+    expect(ctx.song.url).toBe("https://fresh.test/a.m4s");
+  });
+
+  it("does nothing near the real end of the track (normal EOF)", async () => {
+    const ctx = makeCtx({ elapsed: 9_990, duration: 10_000 });
+    expect(await resumeInterruptedStream.call(ctx)).toBe(false);
+    expect(ctx.provider.getSongUrl).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for other platforms or an unknown duration", async () => {
+    expect(await resumeInterruptedStream.call(makeCtx({ platform: "netease" }))).toBe(false);
+    const unknown = makeCtx({ duration: 0 });
+    unknown.effectiveDuration = 0;
+    expect(await resumeInterruptedStream.call(unknown)).toBe(false);
+  });
+
+  it("gives up after 3 attempts that make no progress, then lets the queue advance", async () => {
+    const ctx = makeCtx({ elapsed: 1000 });
+    for (let i = 0; i < 3; i++) {
+      ctx.setElapsed(1000);
+      expect(await resumeInterruptedStream.call(ctx)).toBe(true);
+    }
+    ctx.setElapsed(1000);
+    expect(await resumeInterruptedStream.call(ctx)).toBe(false);
+    expect(ctx.player.play).toHaveBeenCalledTimes(3);
+  });
+
+  it("resets the attempt budget once a resume actually plays on for a while", async () => {
+    const ctx = makeCtx({ elapsed: 1000 });
+    for (let i = 0; i < 3; i++) {
+      ctx.setElapsed(1000);
+      await resumeInterruptedStream.call(ctx);
+    }
+    ctx.setElapsed(2000); // the last resume played ~16 more minutes
+    expect(await resumeInterruptedStream.call(ctx)).toBe(true);
+  });
+
+  it("falls through to advancing when no fresh URL can be fetched", async () => {
+    const ctx = makeCtx({ url: null });
+    expect(await resumeInterruptedStream.call(ctx)).toBe(false);
+    expect(ctx.player.play).not.toHaveBeenCalled();
+  });
+
+  it("does not clobber a different track the user started while the URL was resolving", async () => {
+    const ctx = makeCtx();
+    ctx.provider.getSongUrl.mockImplementation(async () => {
+      ctx.queue.current.mockReturnValue({ id: "other" }); // user ran !next meanwhile
+      return { url: "https://fresh.test/a.m4s" };
+    });
+    expect(await resumeInterruptedStream.call(ctx)).toBe(true); // handled: don't advance again
+    expect(ctx.player.play).not.toHaveBeenCalled();
+  });
+});

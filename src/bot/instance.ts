@@ -193,6 +193,8 @@ export class BotInstance extends EventEmitter {
   private lastSearchResults: Song[] = [];
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
+  /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
+  private streamRecovery: { song: QueuedSong; attempts: number; position: number } | null = null;
   private playGate: Promise<unknown> = Promise.resolve();
   /** Per-bot Jellyfin playback-report session (start / ~10s progress / stop).
    *  null when the wired provider has no reporting capability. */
@@ -322,10 +324,19 @@ export class BotInstance extends EventEmitter {
     });
 
     this.player.on("trackEnd", () => {
-      this.logger.debug("Track ended, advancing queue");
-      this.playNext().catch((err) => {
-        this.logger.error({ err }, "playNext failed after trackEnd");
-      });
+      this.resumeInterruptedStream()
+        .catch((err) => {
+          this.logger.warn({ err }, "Stream resume failed");
+          return false;
+        })
+        .then((resumed) => {
+          if (resumed) return;
+          this.logger.debug("Track ended, advancing queue");
+          return this.playNext();
+        })
+        .catch((err) => {
+          this.logger.error({ err }, "playNext failed after trackEnd");
+        });
     });
 
     this.player.on("error", (err: Error) => {
@@ -1114,6 +1125,69 @@ export class BotInstance extends EventEmitter {
       this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
       return false;
     }
+  }
+
+  /** Platforms whose CDN stream can die mid-file on long content (#89, #161). */
+  private static readonly RESUMABLE_PLATFORMS: ReadonlySet<Platform> = new Set(["bilibili"]);
+  /** A track that ends within this many seconds of its duration ended normally. */
+  private static readonly STREAM_END_TOLERANCE_S = 30;
+  private static readonly MAX_STREAM_RESUMES = 3;
+
+  /**
+   * Called when the player reports a track end. If a B站 stream ended long
+   * before its known duration, the CDN dropped it (#161): fetch a fresh URL
+   * and continue from where it stopped instead of skipping the rest of a
+   * 2-3 hour video. Gives up after MAX_STREAM_RESUMES attempts that make no
+   * real progress, so a truly broken stream still advances the queue.
+   *
+   * Returns true when it handled the end (resumed, or a newer track has
+   * already taken over), false when the caller should advance the queue.
+   */
+  private async resumeInterruptedStream(): Promise<boolean> {
+    const song = this.queue.current();
+    if (!song || !this.connected || !BotInstance.RESUMABLE_PLATFORMS.has(song.platform)) {
+      return false;
+    }
+    const duration = this.effectiveDuration ?? song.duration;
+    const position = Math.floor(this.player.getElapsed());
+    if (!(duration > 0) || duration - position <= BotInstance.STREAM_END_TOLERANCE_S) {
+      return false;
+    }
+
+    const recovery = this.streamRecovery;
+    if (
+      !recovery ||
+      recovery.song !== song ||
+      position - recovery.position > BotInstance.STREAM_END_TOLERANCE_S
+    ) {
+      this.streamRecovery = { song, attempts: 0, position };
+    }
+    const state = this.streamRecovery!;
+    if (state.attempts >= BotInstance.MAX_STREAM_RESUMES) {
+      this.logger.warn(
+        { songId: song.id, position, duration, attempts: state.attempts },
+        "Stream keeps ending early — giving up and advancing",
+      );
+      this.streamRecovery = null;
+      return false;
+    }
+    state.attempts++;
+    state.position = position;
+
+    this.logger.warn(
+      { songId: song.id, position, duration, attempt: state.attempts },
+      "Stream ended before the track did — resuming with a fresh URL",
+    );
+    const result = await this.getProviderFor(song.platform).getSongUrl(song.id);
+    // The user may have skipped/stopped while we were resolving; never
+    // clobber whatever is playing now.
+    if (this.queue.current() !== song || this.player.getState() !== "idle") return true;
+    if (!result?.url || !this.connected) return false;
+
+    song.url = result.url;
+    this.player.play(result.url, position, duration);
+    this.emit("stateChange");
+    return true;
   }
 
   private async syncProfileToSong(song: QueuedSong | null): Promise<void> {
