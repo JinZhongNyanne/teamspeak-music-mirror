@@ -440,6 +440,52 @@ sudo systemctl start tsmusicbot
 
 聊天命令、WebUI、REST API 三种入口的改动都会被持久化。播放队列、当前歌曲、进度、`!fm` / `!artist` 等临时播放状态仍为一次性状态，重启后不保留（`!fm` / `!artist` 内部临时切换的随机 / 循环也**不会**覆盖你用 `!mode` 显式保存的偏好）。
 
+## REST API（API Key）
+
+除浏览器 session 登录外，REST API 还支持用 **API Key** 调用，便于脚本、Home Assistant 等外部集成。
+
+### 创建 Key
+
+登录 WebUI → 设置页 → 「API 密钥」→ 输入名称 → 生成。明文**只在创建时显示一次**（形如 `tsmb_xxxxx…`），之后只能看到前缀；可随时在设置页吊销。Key 的权限与所属账户一致：管理员拥有全部权限，成员只能操作被授权的机器人、使用被授予的能力（播放控制 / 队列管理等）。每位用户最多创建 20 个 Key。
+
+### 调用方式
+
+两种请求头任选其一：
+
+```
+Authorization: Bearer tsmb_xxxxxxxxxxxx
+X-API-Key: tsmb_xxxxxxxxxxxx
+```
+
+> 修改类请求（POST/PUT/DELETE）无需 CSRF Origin 头；WebSocket 推送（`/ws`）暂不支持 API Key，仅限浏览器 session。
+
+### 常用端点示例
+
+```bash
+# 机器人列表（拿到 botId）
+curl -H "Authorization: Bearer $KEY" http://127.0.0.1:3000/api/bot
+
+# 当前队列 + 播放状态
+curl -H "Authorization: Bearer $KEY" http://127.0.0.1:3000/api/player/<botId>/queue
+
+# 点歌（搜索文本 + 平台：netease/qq/bilibili/youtube/kugou/jellyfin/local）
+curl -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+  -d '{"query":"周杰伦 晴天","platform":"netease"}' \
+  http://127.0.0.1:3000/api/player/<botId>/play
+
+# 搜索歌曲（拿 song id / song 对象）
+curl -H "Authorization: Bearer $KEY" \
+  "http://127.0.0.1:3000/api/music/search?q=晴天&platform=netease"
+
+# 播放控制
+curl -X POST -H "X-API-Key: $KEY" http://127.0.0.1:3000/api/player/<botId>/pause
+curl -X POST -H "X-API-Key: $KEY" http://127.0.0.1:3000/api/player/<botId>/next
+curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"volume":50}' http://127.0.0.1:3000/api/player/<botId>/volume
+```
+
+全部端点、参数与返回值见 **[docs/API.md](docs/API.md)**。认证失败返回 `401 {"error":"invalid api key"}`，越权返回 `403`。
+
 ## 项目架构
 
 ```
