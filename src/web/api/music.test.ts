@@ -438,3 +438,68 @@ describe("music router POST /local/upload — content types and size cap (#149)"
     expect(uploadAudio).not.toHaveBeenCalled();
   });
 });
+
+describe("music router GET /bilibili/parts", () => {
+  it("returns 400 when bvid is missing", async () => {
+    const router = createMusicRouter(
+      fakeProvider("netease"),
+      fakeProvider("qq"),
+      fakeProvider("bilibili"),
+      pino({ level: "silent" })
+    );
+    const app = express();
+    app.use("/api/music", router);
+
+    const res = await request(app).get("/api/music/bilibili/parts");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("bvid is required");
+  });
+
+  it("returns parts from bilibili provider when available", async () => {
+    const mockBilibili = {
+      platform: "bilibili" as const,
+      search: vi.fn(),
+      getVideoParts: vi.fn().mockResolvedValue({
+        bvid: "BV1test",
+        title: "多P视频测试",
+        parts: [
+          { part: 1, cid: 101, title: "P1", duration: 100 },
+          { part: 2, cid: 102, title: "P2", duration: 200 },
+        ],
+      }),
+    };
+    const router = createMusicRouter(
+      fakeProvider("netease"),
+      fakeProvider("qq"),
+      mockBilibili as unknown as MusicProvider,
+      pino({ level: "silent" })
+    );
+    const app = express();
+    app.use("/api/music", router);
+
+    const res = await request(app).get("/api/music/bilibili/parts?bvid=BV1test");
+    expect(res.status).toBe(200);
+    expect(res.body.bvid).toBe("BV1test");
+    expect(res.body.parts).toHaveLength(2);
+    expect(mockBilibili.getVideoParts).toHaveBeenCalledWith("BV1test");
+  });
+
+  it("returns 404 when getVideoParts returns null", async () => {
+    const mockBilibili = {
+      platform: "bilibili" as const,
+      search: vi.fn(),
+      getVideoParts: vi.fn().mockResolvedValue(null),
+    };
+    const router = createMusicRouter(
+      fakeProvider("netease"),
+      fakeProvider("qq"),
+      mockBilibili as unknown as MusicProvider,
+      pino({ level: "silent" })
+    );
+    const app = express();
+    app.use("/api/music", router);
+
+    const res = await request(app).get("/api/music/bilibili/parts?bvid=BV1notfound");
+    expect(res.status).toBe(404);
+  });
+});

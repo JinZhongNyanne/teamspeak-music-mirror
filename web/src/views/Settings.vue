@@ -48,6 +48,7 @@
       </form>
       <p v-if="ownPwError" class="user-error">{{ ownPwError }}</p>
       <p v-if="ownPwSuccess" class="user-success">{{ ownPwSuccess }}</p>
+      <PersonalNeteaseAccount v-if="providerOn('netease') && !session.isGuest.value" />
     </section>
 
     <!-- Bot Management (create/edit/delete/start-stop) requires bot.manage -->
@@ -1215,6 +1216,7 @@ import { Icon } from '@iconify/vue';
 import axios from 'axios';
 import AvatarUpload from '../components/AvatarUpload.vue';
 import CustomAvatarRow from '../components/CustomAvatarRow.vue';
+import PersonalNeteaseAccount from '../components/PersonalNeteaseAccount.vue';
 import QRCode from 'qrcode';
 import { usePlayerStore } from '../stores/player.js';
 import { useSession } from '../composables/useSession.js';

@@ -382,6 +382,31 @@ export function createMusicRouter(
     }
   });
 
+  // B站分P列表查询
+  router.get("/bilibili/parts", async (req, res) => {
+    try {
+      const bvid = (req.query.bvid as string)?.trim();
+      if (!bvid) {
+        res.status(400).json({ error: "bvid is required" });
+        return;
+      }
+      const provider = bilibiliProvider as any;
+      if (typeof provider.getVideoParts === "function") {
+        const result = await provider.getVideoParts(bvid);
+        if (!result) {
+          res.status(404).json({ error: "Video not found" });
+          return;
+        }
+        res.json(result);
+      } else {
+        res.status(501).json({ error: "Not supported" });
+      }
+    } catch (err) {
+      logger.error({ err }, "Get bilibili parts failed");
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   // Enabled sources + default platform, for the web UI (source tabs, default
   // search/playback source). Without a config (unit-test routers) everything
   // reports enabled with the legacy netease default.

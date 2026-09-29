@@ -13,7 +13,13 @@ import {
   canRunCommand,
   type ParsedCommand,
 } from "./commands.js";
-import { parseSongRef, parseSelectionIndex } from "./song-ref.js";
+import {
+  parseSongRef,
+  parseSelectionIndex,
+  parsePlaylistRef,
+  findShareShortLink,
+  resolveShareLink,
+} from "./song-ref.js";
 import { splitTextIntoChunks } from "./text-chunk.js";
 import type { Logger } from "../logger.js";
 import { SHARED_QUEUE_OWNER, type BotDatabase, type ProfileConfig, type StoredSong } from "../data/database.js";
@@ -456,11 +462,16 @@ export class BotInstance extends EventEmitter {
       this.voiceDucking.removeSpeaker(event.id);
       void this.refreshOccupancy();
     });
-    this.tsClient.on("clientMoved", (event: { id: number }) => {
+    this.tsClient.on("clientMoved", (event: { id: number; targetChannelID: bigint }) => {
       if (event.id === this.tsClient.getClientId()) {
         // Moving the bot invalidates every activity deadline from its old
         // channel even if no individual leave events arrive.
         this.voiceDucking.reset(false);
+        // Carry the now-playing channel description over to the new
+        // channel instead of leaving it stale in the old one (#159).
+        this.profileManager.onChannelMoved(event.targetChannelID).catch((err) => {
+          this.logger.warn({ err }, "Channel description move update failed");
+        });
       } else {
         this.voiceDucking.removeSpeaker(event.id);
       }
@@ -968,6 +979,14 @@ export class BotInstance extends EventEmitter {
     this.voteSkipUsers.clear();
     const provider = this.getProviderFor(song.platform);
     try {
+      if (song.platform === "bilibili" && (!song.id.includes("?p=") || song.duration === 0)) {
+        const detail = await provider.getSongDetail(song.id);
+        if (detail) {
+          song.duration = detail.duration;
+          song.name = detail.name;
+          song.id = detail.id;
+        }
+      }
       const result = await provider.getSongUrl(song.id);
       if (!result?.url) {
         this.logger.warn({ songId: song.id, name: song.name }, "No URL available, skipping");
@@ -1134,7 +1153,12 @@ export class BotInstance extends EventEmitter {
         return { error: `No recent search. Use ${p}search <name> first.` };
       if (sel > this.lastSearchResults.length)
         return { error: `Invalid selection #${sel}. ${p}search returned ${this.lastSearchResults.length} results.` };
-      return { song: this.lastSearchResults[sel - 1] };
+      let song = this.lastSearchResults[sel - 1];
+      if (song.platform === "bilibili") {
+        const detail = await this.getProviderFor("bilibili").getSongDetail(song.id);
+        if (detail) song = { ...detail, platform: "bilibili" };
+      }
+      return { song };
     }
 
     // 2) id/URL — fetch that exact song.
@@ -1151,7 +1175,12 @@ export class BotInstance extends EventEmitter {
     const provider = this.getProvider(cmd.flags);
     const result = await provider.search(args, 1);
     if (result.songs.length === 0) return { error: `No results found for: ${args}` };
-    return { song: { ...result.songs[0], platform: provider.platform } };
+    let song = result.songs[0];
+    if (provider.platform === "bilibili") {
+      const detail = await provider.getSongDetail(song.id);
+      if (detail) song = detail;
+    }
+    return { song: { ...song, platform: provider.platform } };
   }
 
   private async cmdSearch(cmd: ParsedCommand): Promise<string> {
@@ -1495,8 +1524,21 @@ export class BotInstance extends EventEmitter {
   }
 
   private async cmdPlaylist(cmd: ParsedCommand, requesterName?: string): Promise<string> {
-    if (!cmd.args) return "Usage: !playlist <playlist name or ID>";
-    const provider = this.getProvider(cmd.flags);
+    if (!cmd.args) return "Usage: !playlist <playlist name, ID or link>";
+
+    // A playlist link (#160) names its own platform, so it wins over flags.
+    // App share short links are followed one hop to the real URL first.
+    let ref = parsePlaylistRef(cmd.args);
+    if (!ref) {
+      const shortLink = findShareShortLink(cmd.args);
+      if (shortLink) {
+        const target = await resolveShareLink(shortLink);
+        ref = target ? parsePlaylistRef(target) : null;
+        if (!ref) return "Could not open that share link — paste the full playlist link or its ID instead";
+      }
+    }
+    if (ref) this.assertProviderEnabled(ref.platform);
+    const provider = ref ? this.getProviderFor(ref.platform) : this.getProvider(cmd.flags);
 
     // Determine if input is a direct ID (numeric / Jellyfin GUID) or a name search
     const id = this.extractId(cmd.args);
@@ -1504,7 +1546,9 @@ export class BotInstance extends EventEmitter {
 
     let playlistId: string;
 
-    if (isDirectId || id !== cmd.args) {
+    if (ref) {
+      playlistId = ref.id;
+    } else if (isDirectId || id !== cmd.args) {
       // Input is a direct ID or URL containing an ID — use existing logic
       playlistId = id;
     } else {

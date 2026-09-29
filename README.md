@@ -42,7 +42,7 @@
 - **完整播放控制** — 播放/暂停/上一首/下一首/进度跳转/音量调节
 - **四种播放模式** — 顺序播放/循环播放/随机播放/随机循环
 - **实时歌词同步** — 歌词滚动显示，支持翻译歌词，服务端帧计数精确同步
-- **歌单管理** — 推荐歌单/我的歌单/每日推荐/私人FM，点击播放全部；私人 FM 支持网易云、**QQ 音乐雷达推荐**（`!fm -q`）与**酷狗私人电台**（`!fm -k`）。网易云、QQ、酷狗均提供登录后的推荐歌单 / 每日推荐 / 我的歌单
+- **歌单管理** — 推荐歌单/我的歌单/每日推荐/私人FM，点击播放全部；私人 FM 支持网易云、**QQ 音乐雷达推荐**（`!fm -q`）与**酷狗私人电台**（`!fm -k`）。网易云、QQ、酷狗均提供登录后的推荐歌单 / 每日推荐 / 我的歌单。多人共用时，每个网页端用户可在 **设置 → 账户** 扫码绑定**自己的网易云账号**，之后他在网页端开启的网易云私人 FM 按他自己的口味推荐（未绑定则用机器人的共享账号；TS 聊天里的 `!fm` 仍用共享账号）
 - **音质选择** — 标准(128k) / 较高(192k) / 极高(320k) / 无损(FLAC) / Hi-Res / 超清母带
 - **B站视频音频提取** — 搜索B站视频，自动提取DASH最高码率音频流播放
 - **B站热门推荐** — 首页展示B站热门视频和个性化推荐（登录后更准确）
@@ -136,14 +136,35 @@ ports:
 
 </details>
 
-### 方式四：Linux 一键安装
+### 方式四：Linux 安装脚本
+
+Linux 下有两个脚本，按需二选一：
+
+| | `scripts/install.sh`（一键安装 + 系统服务） | `scripts/setup.sh`（只安装构建） |
+|---|---|---|
+| 适合 | 想开箱即用、开机自启的服务器 | 想自己决定怎么常驻（screen / tmux / pm2 / 自写服务）的用户，或 macOS |
+| Node.js | 没有或版本过低时**自动安装 Node 22 LTS**（apt / yum / pacman） | **不会安装**，需先自行装好 Node 22.12+ |
+| 系统依赖 | 自动安装构建工具（和 FFmpeg，作为内置 FFmpeg 的后备） | 不安装，只提示 |
+| 安装位置 | 构建后复制到 `/opt/tsmusicbot`（重装时保留 `data/`） | 就在当前项目目录 |
+| 系统服务 | 自动配置 systemd 服务 `tsmusicbot` 并开机自启 | **不配置服务**，完成后自己 `npm start` |
+| 需要 root | 是（`sudo`） | 否 |
+
+两者共用同一套安装逻辑：`install.sh` 会调用 `setup.sh` 完成依赖安装、国内网络镜像切换、原生模块校验和构建，然后再复制文件、配置服务。
+
+**一键安装 + systemd 服务：**
 
 ```bash
 chmod +x scripts/install.sh
 sudo ./scripts/install.sh
+# 之后：systemctl status|restart|stop tsmusicbot，日志：journalctl -u tsmusicbot -f
 ```
 
-自动安装 Node.js 和依赖，配置 systemd 服务，支持开机自启。
+**只安装构建（不装 Node、不配服务）：**
+
+```bash
+bash scripts/setup.sh
+npm start
+```
 
 ## 更新升级
 
@@ -364,6 +385,7 @@ sudo systemctl start tsmusicbot
 | `!mode <seq\|loop\|random\|rloop>` | 切换播放模式 |
 | `!playlist <歌单名或ID>` | 加载歌单（支持名称模糊搜索和 ID；Jellyfin 歌单 GUID 也可直接粘贴） |
 | `!playlist -q <歌单名>` | 从 QQ 音乐搜索并加载歌单 |
+| `!playlist <歌单链接>` | 直接粘贴网易云 / QQ 音乐 / YouTube 歌单链接加载，平台由链接自动识别，无需加 `-q` 等标志；也可直接粘贴 App 的分享文案或短链（`163cn.tv`、`c6.y.qq.com`） |
 | `!album <专辑名或ID>` | 加载专辑（支持名称搜索 / 数字 ID / Jellyfin GUID） |
 | `!artist <歌手名>` | 按歌手循环播放（支持 `-j`/`-n`/`-q`/`-k`/`-b`/`-y`） |
 | `!fm` | 私人 FM（默认网易云，自动续播） |
@@ -541,6 +563,7 @@ teamspeak-music-bot/
 ├── scripts/                    # 部署脚本
 │   ├── setup.bat               # Windows 首次安装
 │   ├── start.bat               # Windows 启动脚本
+│   ├── setup.sh                # Linux/macOS 首次安装（只安装构建）
 │   ├── install.sh              # Linux 一键安装 + systemd 服务
 │   └── docker/                 # Docker 部署文件
 │       ├── Dockerfile
@@ -930,7 +953,36 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.13.0：本地视频上传播放 / 头像上传时机
+### 最新版本 — v1.14.0：歌单链接直接播放 / 每人绑定自己的网易云私人FM / B站分P
+
+处理了 5 个社区反馈的 issue。**没有配置变化，升级无需任何操作**；数据库会自动新增一张表（存放用户自己绑定的网易云账号），原有数据不受影响。
+
+**`!playlist` 直接粘贴歌单链接（[#160](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/160)，[PR #169](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/169)，感谢 [@JiaxiangACE](https://github.com/JiaxiangACE)）**
+
+- `!playlist <歌单链接>` 支持网易云 / QQ 音乐 / YouTube 歌单链接，**平台由链接自动识别**：以前 QQ 链接不加 `-q` 会被拿去网易云查，YouTube 的 `?list=` 链接会被当成歌单名去搜索，现在都能直接用。
+- App 里「分享」复制出来的整段文案、以及短链（`163cn.tv`、`c6.y.qq.com`）也能直接粘贴。短链只会访问这两个域名，不会去请求任意用户给的地址。
+- 歌单名和纯数字 ID 的用法不变。
+
+**每个网页端用户绑定自己的网易云账号听私人FM（[#164](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/164)，[PR #171](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/171)，感谢 [@xxmod](https://github.com/xxmod)）**
+
+- 多人共用一个机器人时，私人FM以前永远按机器人登录的那一个账号推荐。现在每个成员可以在 **设置 → 账户** 扫码绑定自己的网易云账号，之后他在网页端开启的网易云私人FM按他自己的口味推荐；未绑定的人照旧使用共享账号。
+- 绑定的登录只保存在服务器上，从不回传给浏览器，也**不会**顶掉机器人的共享登录；删除用户时一并清除。游客不能绑定。
+- TS 聊天里的 `!fm` 仍使用共享账号（聊天里的 TS 用户和网页账号没有对应关系）。
+
+**机器人被移动后，原频道描述不再残留（[#159](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/159)，[PR #168](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/168)，感谢 [@Almighty-ap](https://github.com/Almighty-ap)）**
+
+- 开启「更新频道描述」时，把机器人拖到别的频道后，原频道会一直停留在当时的歌曲信息。现在机器人被移动时会清空原频道描述，并把正在播放的信息写到新频道。
+
+**Linux 安装脚本（[#165](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/165)，[PR #172](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/172)，感谢 [@XuVIIJay](https://github.com/XuVIIJay)）**
+
+- `scripts/install.sh` 以前仍在安装已不再支持的 Node 20，现在按发行版（apt / yum / pacman）安装 Node 22 LTS，并复用 `setup.sh` 完成依赖安装、国内镜像切换、原生模块校验和构建。重复运行（升级）时会先停服务、替换构建产物，**保留 `data/`**。
+- README 的「Linux 安装脚本」一节说明了 `install.sh`（一键安装 + systemd 开机自启）和 `setup.sh`（只安装构建、不装 Node、不配服务）的区别和适用场景。
+
+**B站分P视频（[PR #166](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/166)，感谢 [@xxmod](https://github.com/xxmod)）**
+
+- 分P视频以前只能播放第一P，且时长显示为整个视频的总时长。现在网页端播放多P视频时会弹出选择框选P；TS 里 `!play` 播放第一P。
+
+### v1.13.0：本地视频上传播放 / 头像上传时机
 
 处理了 2 个社区反馈的 issue。**没有配置变化，升级无需任何操作**；原有的本地音频上传行为完全不变。
 
