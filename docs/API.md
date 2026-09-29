@@ -191,7 +191,9 @@ interface BotStatus {
 | POST | `/playlist` | `player.queue` | `{ playlistId, platform? }`(追加整个歌单) | `{ message }` |
 | POST | `/fm` | `player.control` | `{ platform? }`(私人 FM 模式) | `{ ok, message }` |
 
-`/play` 与 `/add` 接受搜索文本,内部按 `platform` 调对应音源搜索并播放/入队第一个结果;`/play-song` 系列接受 `/api/music` 返回的完整 Song 对象。
+`/play` 与 `/add` 接受搜索文本,内部按 `platform` 调对应音源搜索并播放/入队第一个结果;`/play-song` 系列接受 `/api/music` 返回的完整 Song 对象。B站多P视频的 Song `id` 形如 `BVxxxx?p=2`(见 `/api/music/bilibili/parts`),传对应分P的 id 即播放该分P。
+
+`/fm` 的平台为网易时,若调用者账户已绑定个人网易账号(见 `/api/me/music`),FM 曲目按**个人账号**的口味推荐;未绑定则使用机器人共享登录。
 
 ### 播放器控制
 
@@ -241,6 +243,7 @@ ProfileConfig:`{ avatarEnabled, descriptionEnabled, nicknameEnabled, awayStatusE
 | GET | `/personal/fm` | `platform` | `{ songs }`(私人 FM;非游客) |
 | GET | `/user/playlists` | `platform` | `{ playlists }`(当前登录音源账号的歌单;非游客) |
 | GET | `/bilibili/popular` | `limit`(默认 20) | `{ songs }` |
+| GET | `/bilibili/parts` | `bvid`(BV 号或视频链接) | `{ bvid, title, coverUrl, artist, parts }`(无此视频 404) |
 | GET | `/providers` | — | `{ enabled: Platform[], default: Platform }` |
 | GET | `/quality` | — | `{ netease, qq, bilibili, local, kugou, spotify, jellyfin }` |
 | POST | `/quality` | `{ quality, platform? }`(能力 `quality`;省略 platform 时对所有音源生效) | `{ success, quality }` |
@@ -309,6 +312,19 @@ curl -X POST -H "X-API-Key: $KEY" -H "x-filename: theme.mp3" \
 | GET | `/login` | `platform.auth` | `{ url }`(accounts.spotify.com 授权页,浏览器打开) |
 | GET | `/callback` | — | OAuth 回调,重定向回 WebUI(浏览器流程,脚本无需调用) |
 | GET | `/status` | 非游客 | `{ authorized, backend, deviceName, binaryAvailable }` |
+
+---
+
+## 个人音乐账号 /api/me/music(非游客,仅本人数据)
+
+绑定**自己的**网易账号,让 `POST /api/player/:botId/fm` 按个人口味推荐;cookie 只存服务端,任何接口都不会回传。与 `/api/auth` 的机器人共享登录互不影响。
+
+| 方法 | 路径 | 参数 | 返回 |
+|------|------|------|------|
+| GET | `/netease/status` | — | `{ linked, loggedIn, nickname?, avatarUrl? }` |
+| POST | `/netease/qrcode` | — | `{ qrUrl, qrImg?(base64 data URL), key }`(个人绑定专用二维码) |
+| GET | `/netease/qrcode/status` | `key` | `{ status: "waiting"|"scanned"|"confirmed"|"expired" }`;confirmed 后自动绑定到当前账户 |
+| DELETE | `/netease` | — | `{ ok: true }`(解除绑定) |
 
 ---
 
