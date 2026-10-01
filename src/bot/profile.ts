@@ -288,32 +288,38 @@ export class BotProfileManager {
 
   private async updateDescription(song: QueuedSong | null): Promise<void> {
     if (!this.config.descriptionEnabled || this.permDenied.description) return;
+
     try {
       const text = song
         ? `${song.name} - ${song.artist} [${song.album}]`
         : "";
+
+      const clid = this.tsClient.getClientId();
+      if (clid <= 0) return;
+
       const httpQuery = this.tsClient.getHttpQuery();
+
       if (httpQuery) {
-        // TS6 HTTP API: send the raw (unescaped) text. clientUpdate
-        // throws HttpQueryError on non-2xx so a silent 400/403 cannot
-        // be misreported as success.
-        const result = await httpQuery.clientUpdate({ client_description: text });
-        this.logger.info({ status: result.status }, "Description updated");
+        // IMPORTANT:
+        // clientUpdate() would modify the HTTP Query/serveradmin client.
+        // Explicitly edit the real visible music client instead.
+        const result = await httpQuery.clientEdit(clid, {
+          client_description: text,
+        });
+
+        this.logger.info(
+          { status: result.status, clid },
+          "Description updated",
+        );
       } else {
-        // clientupdate rejects client_description (error 1538).
-        // Use clientedit on our own clid instead — this is what
-        // TS3AudioBot does via TSLib's ChangeDescription().
-        const clid = this.tsClient.getClientId();
-        if (clid <= 0) return;
-        // Use a 5s timeout — if clientedit hangs, don't block the
-        // remaining profile updates (channeledit, now-playing msg).
         await this.withTimeout(
           this.tsClient.execCommand(
             `clientedit clid=${clid} client_description=${escapeTS3(text)}`,
           ),
           5000,
         );
-        this.logger.info("Description updated");
+
+        this.logger.info({ clid }, "Description updated");
       }
     } catch (err) {
       this.handleFeatureError("description", err);
@@ -353,37 +359,33 @@ export class BotProfileManager {
         rawProps.client_away = 0;
       } else {
         rawProps.client_away = 1;
-        rawProps.client_away_message = "\u7B49\u5F85\u64AD\u653E";
+        rawProps.client_away_message = "等待播放";
       }
     }
 
     if (Object.keys(rawProps).length === 0) return;
 
     try {
-      const httpQuery = this.tsClient.getHttpQuery();
-      if (httpQuery) {
-        // TS6: send raw values as JSON. Throws HttpQueryError on 4xx/5xx.
-        const result = await httpQuery.clientUpdate(rawProps);
-        this.logger.info(
-          { status: result.status, props: Object.keys(rawProps) },
-          "Client properties updated (nickname + away)",
-        );
-      } else {
-        // TS3 wire protocol: escape string values inline.
-        // sendCommandNoWait: the TS3 full-client protocol often
-        // doesn't return a timely error response for clientupdate,
-        // causing execCommand to time out after 10s.
-        const parts = Object.entries(rawProps).map(([k, v]) =>
-          typeof v === "string" ? `${k}=${escapeTS3(v)}` : `${k}=${v}`,
-        );
-        await this.tsClient.sendCommandNoWait(`clientupdate ${parts.join(" ")}`);
-        this.logger.info(
-          { props: Object.keys(rawProps) },
-          "Client properties updated (nickname + away)",
-        );
-      }
+      // clientupdate modifies whichever connection sends the command.
+      // Therefore it must be sent by the real full client, NOT HTTP Query.
+      const parts = Object.entries(rawProps).map(([key, value]) =>
+        typeof value === "string"
+          ? `${key}=${escapeTS3(value)}`
+          : `${key}=${value}`,
+      );
+
+      await this.tsClient.sendCommandNoWait(
+        `clientupdate ${parts.join(" ")}`,
+      );
+
+      this.logger.info(
+        {
+          clid: this.tsClient.getClientId(),
+          props: Object.keys(rawProps),
+        },
+        "Client properties updated (nickname + away)",
+      );
     } catch (err) {
-      // Flag both features on permission error
       this.handleFeatureError("nickname", err);
       this.handleFeatureError("awayStatus", err);
     }
@@ -439,30 +441,118 @@ export class BotProfileManager {
     targetChannelId?: bigint,
   ): Promise<void> {
     if (!this.config.channelDescEnabled || this.permDenied.channelDesc) return;
+
     try {
-      const channelId = targetChannelId ?? this.tsClient.getChannelId();
+      let channelId = targetChannelId ?? this.tsClient.getChannelId();
+
+      // TS6 full-client may report channelID() as 0 even after the
+      // visible music client has already joined a channel.
+      // Fall back to HTTP Query and resolve our real clid -> cid.
+      if (channelId === 0n) {
+        const httpQuery = this.tsClient.getHttpQuery();
+        const clid = this.tsClient.getClientId();
+
+        if (httpQuery && clid > 0) {
+          const result = await httpQuery.clientList();
+
+          const payload = result.body as {
+            body?: Array<Record<string, string>>;
+          };
+
+          const me = payload.body?.find(
+            (client) => Number(client.clid) === clid,
+          );
+
+          if (me?.cid) {
+            channelId = BigInt(me.cid);
+
+            this.logger.info(
+              {
+                clid,
+                cid: channelId.toString(),
+              },
+              "Resolved channel ID via HTTP Query",
+            );
+          }
+        }
+      }
+
       if (!song) {
-        // Prefer the channel we actually wrote to, in case a move event
-        // was missed and the bot is somewhere else now.
         const target = this.channelDescCid ?? channelId;
-        if (target === 0n) return; // unknown channel
-        await this.tsClient.sendCommandNoWait(
-          `channeledit cid=${target} channel_description=`,
-        );
+
+        if (target === 0n) return;
+
+        const httpQuery = this.tsClient.getHttpQuery();
+
+        if (httpQuery) {
+          const result = await httpQuery.channelEdit(Number(target), {
+            channel_description: "",
+          });
+
+          this.logger.info(
+            {
+              status: result.status,
+              cid: target.toString(),
+            },
+            "Channel description cleared",
+          );
+        } else {
+          await this.withTimeout(
+            this.tsClient.execCommand(
+              `channeledit cid=${target} channel_description=`,
+            ),
+            5000,
+          );
+
+          this.logger.info(
+            { cid: target.toString() },
+            "Channel description cleared",
+          );
+        }
+
         this.channelDescCid = null;
         return;
       }
-      if (channelId === 0n) return; // unknown channel
+
+      if (channelId === 0n) return;
 
       const lines = [
-        `\u266A \u6B63\u5728\u64AD\u653E: ${song.name} - ${song.artist}`, // ♪ 正在播放:
-        `\u4E13\u8F91: ${song.album}`, // 专辑:
-        `\u5E73\u53F0: ${song.platform}`, // 平台:
+        `♪ 正在播放: ${song.name} - ${song.artist}`,
+        `专辑: ${song.album}`,
+        `平台: ${song.platform}`,
       ];
-      const desc = lines.join("\\n");
-      await this.tsClient.sendCommandNoWait(
-        `channeledit cid=${channelId} channel_description=${escapeTS3(desc)}`,
-      );
+
+      // HTTP Query uses a normal JSON string, so use real newlines here.
+      const desc = lines.join("\n");
+
+      const httpQuery = this.tsClient.getHttpQuery();
+
+      if (httpQuery) {
+        const result = await httpQuery.channelEdit(Number(channelId), {
+          channel_description: desc,
+        });
+
+        this.logger.info(
+          {
+            status: result.status,
+            cid: channelId.toString(),
+          },
+          "Channel description updated",
+        );
+      } else {
+        await this.withTimeout(
+          this.tsClient.execCommand(
+            `channeledit cid=${channelId} channel_description=${escapeTS3(desc)}`,
+          ),
+          5000,
+        );
+
+        this.logger.info(
+          { cid: channelId.toString() },
+          "Channel description updated",
+        );
+      }
+
       this.channelDescCid = channelId;
     } catch (err) {
       this.handleFeatureError("channelDesc", err);

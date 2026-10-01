@@ -209,6 +209,51 @@ export class TS6HttpQuery {
     return result;
   }
 
+  /**
+   * Edit a specific connected client.
+   *
+   * clientUpdate() modifies the HTTP Query client itself.
+   * clientEdit() explicitly targets the supplied clid.
+   */
+  async clientEdit(
+    clid: number,
+    properties: Record<string, string | number>,
+    sid = 1,
+  ): Promise<HttpQueryResult> {
+    const path = `/1/clientedit?sid=${sid}`;
+    const result = await this.request("POST", path, {
+      clid,
+      ...properties,
+    });
+
+    if (result.status < 200 || result.status >= 300) {
+      throw new HttpQueryError(path, result.status, result.body);
+    }
+
+    return result;
+  }
+
+  /**
+   * Edit a specific channel.
+   */
+  async channelEdit(
+    cid: number,
+    properties: Record<string, string | number>,
+    sid = 1,
+  ): Promise<HttpQueryResult> {
+    const path = `/1/channeledit?sid=${sid}`;
+    const result = await this.request("POST", path, {
+      cid,
+      ...properties,
+    });
+
+    if (result.status < 200 || result.status >= 300) {
+      throw new HttpQueryError(path, result.status, result.body);
+    }
+
+    return result;
+  }
+
   /** Move a client to a channel */
   async clientMove(
     clid: number,
