@@ -583,6 +583,37 @@ export const usePlayerStore = defineStore('player', {
       }
     },
 
+    /**
+     * Queue an artist's songs. The server always loads the singer's FULL
+     * catalogue (never just the hot 50), which costs it a few upstream round
+     * trips, so the caller gets a "loading" notice first.
+     */
+    async playArtist(artistId: string, platform = 'netease') {
+      if (!this.activeBotId) return;
+      this.notify('正在载入该歌手的全部歌曲…', 'info');
+      try {
+        const res = await axios.post(
+          `/api/player/${this.activeBotId}/play-artist`,
+          { artistId, platform },
+        );
+        if (res.data?.message) {
+          this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
+        }
+        this._setTiming(this.activeBotId, { serverElapsed: 0 });
+        this._syncAfterAction();
+      } catch (e: any) {
+        const status = e?.response?.status;
+        this.notify(
+          status === 403
+            ? '没有权限播放整个歌手'
+            : status === 501
+              ? '该音源不支持播放歌手歌曲'
+              : '播放歌手失败',
+          'error',
+        );
+      }
+    },
+
     async pause() {
       if (!this.activeBotId) return;
       // Freeze elapsed at the current LIVE interpolated value. Using the cached
