@@ -953,7 +953,15 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.15.0：歌手页面 / REST API / TS6 Profile 与 B站续播修复
+### 最新版本 — v1.15.1：长视频播放阻塞与音乐 API 日志隐私修复
+
+- 持续读取 FFmpeg 的 stderr，并关闭周期性进度输出，避免错误输出管道写满后卡住音频解码。直接 URL 播放和 Windows 临时文件播放均已处理。
+- FFmpeg 异常退出和播放停滞日志增加限长、脱敏的诊断摘要；移除 URL 查询参数、用户凭据和认证头，PowerShell 下载失败日志采用同样的处理。
+- 内置网易云 / QQ 音乐 API 在独立子进程运行，隔离依赖直接输出的原始请求和响应日志，避免其中的 Cookie 等凭据进入机器人控制台日志。仍保留服务启动和退出的安全诊断；独立部署或已占用端口的外部 API 需自行管理日志。
+
+无配置或数据库迁移。此补丁修复了已复现的管道阻塞；[#161](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/161) 中“67 分钟视频播到 37 分钟停止”的现场原因仍缺少停止时日志，尚未确认。
+
+### v1.15.0：歌手页面 / REST API / TS6 Profile 与 B站续播修复
 
 **歌手搜索与页面（[PR #175](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/175)，感谢 [@zzstar101](https://github.com/zzstar101)）**
 
