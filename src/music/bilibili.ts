@@ -43,6 +43,37 @@ export interface BiliVideoPartsResult {
 }
 
 /**
+ * PCDN / P2P edge hosts (xy*.mcdn.bilivideo.cn:<port>, *.szbdyd.com). Their
+ * sessions get cut mid-file, which kills long streams partway (#89, #161),
+ * and a reconnect to the same host rarely recovers.
+ */
+const BILI_PCDN_HOST = /\.mcdn\.bilivideo\.cn$|\.szbdyd\.com$/i;
+
+/**
+ * Pick the audio URL least likely to die mid-stream: the first upos/cos
+ * mirror among baseUrl + backupUrl, else the baseUrl as before.
+ */
+export function pickStableAudioUrl(stream: {
+  baseUrl?: string;
+  base_url?: string;
+  backupUrl?: string[];
+  backup_url?: string[];
+}): string | undefined {
+  const primary = stream.baseUrl ?? stream.base_url;
+  const candidates = [primary, ...(stream.backupUrl ?? stream.backup_url ?? [])].filter(
+    (u): u is string => typeof u === "string" && u.length > 0,
+  );
+  const stable = candidates.find((u) => {
+    try {
+      return !BILI_PCDN_HOST.test(new URL(u).hostname);
+    } catch {
+      return false;
+    }
+  });
+  return stable ?? primary;
+}
+
+/**
  * 解析带有分P信息的 B站 ID 或 URL。
  * 支持形如 "BVxxxx", "BVxxxx?p=2", "BVxxxx:p2" 以及完整 URL 等格式，默认 page 为 1。
  */
@@ -353,7 +384,7 @@ export class BiliBiliProvider implements MusicProvider {
         (b.bandwidth ?? 0) > (a.bandwidth ?? 0) ? b : a
       );
 
-      const biliUrl = best.baseUrl ?? best.base_url;
+      const biliUrl = pickStableAudioUrl(best);
       return biliUrl ? { url: biliUrl } : null;
     } catch {
       return null;
