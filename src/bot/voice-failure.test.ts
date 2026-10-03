@@ -6,9 +6,14 @@ import { AudioPlayer } from "../audio/player.js";
 import { PlayQueue } from "../audio/queue.js";
 import { PCM_FRAME_BYTES } from "../audio/encoder.js";
 import { TS3Client } from "../ts-protocol/client.js";
+import { createDatabase, type BotDatabase } from "../data/database.js";
+
+const databases: BotDatabase[] = [];
 
 function makeHarness(platform: "bilibili" | "spotify" = "bilibili") {
   const logger = pino({ level: "silent" });
+  const database = createDatabase(":memory:");
+  databases.push(database);
   const player = new AudioPlayer(logger);
   const queue = new PlayQueue();
   queue.add({ id: "offline-fixture", name: "67-minute fixture", artist: "fixture", album: "", coverUrl: "", platform, duration: 4020 });
@@ -18,19 +23,24 @@ function makeHarness(platform: "bilibili" | "spotify" = "bilibili") {
   let sidecarPauses = 0;
   const bot = Object.assign(new EventEmitter(), {
     logger, player, queue, tsClient, connected: true, autoPaused: true,
+    id: "offline-bot", database, config: { savedQueuesEnabled: true }, isFmMode: false,
     streamRecovery: null, lifecycleGeneration: 0,
     spotifyController: Object.assign(new EventEmitter(), { pause: async () => { sidecarPauses++; } }),
   });
   const methods = BotInstance.prototype as unknown as {
     setupTsEvents(this: typeof bot): void;
     cmdPause(this: typeof bot): string;
+    persistQueueSnapshot(this: typeof bot): void;
   };
-  Object.assign(bot, { cmdPause: methods.cmdPause });
+  Object.assign(bot, { cmdPause: methods.cmdPause, persistQueueSnapshot: methods.persistQueueSnapshot });
   methods.setupTsEvents.call(bot);
-  return { bot, player, queue, tsClient, sidecarPauses: () => sidecarPauses };
+  return { bot, player, queue, tsClient, database, sidecarPauses: () => sidecarPauses };
 }
 
-afterEach(() => { vi.clearAllTimers(); vi.restoreAllMocks(); vi.useRealTimers(); });
+afterEach(() => {
+  vi.clearAllTimers();vi.restoreAllMocks();vi.useRealTimers();
+  for (const database of databases.splice(0)) database.close();
+});
 
 describe("BotInstance persistent voice send failure", () => {
   it.each(["bilibili", "spotify"] as const)("pauses %s while retaining the song and playback position", platform => {
@@ -45,6 +55,8 @@ describe("BotInstance persistent voice send failure", () => {
       expect(h.queue.current()).toBe(song);
       expect(h.queue.size()).toBe(1);
       expect(h.bot.autoPaused).toBe(false);
+      expect(h.database.getQueueState("offline-bot")).toMatchObject({ paused: true, currentIndex: 0 });
+      expect(h.database.getQueueState("offline-bot")?.songs[0]?.id).toBe("offline-fixture");
       expect(changes).toBe(1);
       expect(h.sidecarPauses()).toBe(platform === "spotify" ? 1 : 0);
       h.tsClient.emit("voiceSendFailed", { consecutiveFailures: 200, durationMs: 4000 });
@@ -99,6 +111,7 @@ describe("BotInstance persistent voice send failure", () => {
     const recovery = resume.call(h.bot);
     try {
       h.tsClient.emit("voiceSendFailed", { code: "EPIPE", consecutiveFailures: 100, durationMs: 2000 });
+      expect(h.database.getQueueState("offline-bot")?.paused).toBe(true);
       resolve({ url: "https://offline.invalid/fresh.m4s" });
       expect(await recovery).toBe(true);
       expect(h.player.getState()).toBe("paused");
