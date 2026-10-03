@@ -22,6 +22,7 @@ import { createFavoritesRouter } from "./api/favorites.js";
 import { createPersonalMusicRouter } from "./api/personal-music.js";
 import { createSavedQueuesRouter } from "./api/saved-queues.js";
 import { createSpotifyRouter } from "./api/spotify.js";
+import { createApiKeysRouter } from "./api/api-keys.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
 import type { SpotifyProvider } from "../music/spotify/provider.js";
 import type { JellyfinProvider } from "../music/jellyfin.js";
@@ -33,6 +34,7 @@ import {
 import { setupWebSocket } from "./websocket.js";
 import { createUserStore } from "../data/users.js";
 import { createSessionStore } from "../data/sessions.js";
+import { createApiKeyStore } from "../data/api-keys.js";
 import { createPermissionStore } from "../data/permissions.js";
 import { createRequireAuth } from "./middleware/requireAuth.js";
 import { requireAdmin } from "./middleware/requireAdmin.js";
@@ -102,6 +104,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
   const sessions = createSessionStore(options.database.db);
   const audit = createAuditStore(options.database.db);
   const permissions = createPermissionStore(options.database.db);
+  const apiKeys = createApiKeyStore(options.database.db);
 
   // ─── Public routes (no auth, no CSRF) ───────────────────────────────────
   // Disallow every crawler (issue #128). Declared before the static SPA
@@ -131,7 +134,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
   app.use("/api/session", createSessionRouter(users, sessions, audit, logger, permissions, () => options.config.guestMode));
 
   // ─── Gates for everything else under /api ───────────────────────────────
-  const requireAuth = createRequireAuth(sessions, permissions, () => options.config.guestMode);
+  const requireAuth = createRequireAuth(sessions, permissions, () => options.config.guestMode, apiKeys);
   app.use("/api", csrfOriginCheck);
   app.use("/api", requireAuth);
 
@@ -225,8 +228,12 @@ export function createWebServer(options: WebServerOptions): WebServer {
   );
 
   // admin-only routes
-  app.use("/api/users", requireAdmin, createUsersRouter(users, sessions, audit, logger, permissions));
+  app.use("/api/users", requireAdmin, createUsersRouter(users, sessions, audit, logger, permissions, apiKeys));
   app.use("/api/audit", requireAdmin, createAuditRouter(audit));
+
+  // API-key management — interactive sessions only (guests excluded; the
+  // router itself rejects key-authenticated requests).
+  app.use("/api/keys", requireNotGuest, createApiKeysRouter(apiKeys, audit, logger));
 
   // ─── Static SPA (public) ────────────────────────────────────────────────
   if (options.staticDir) {
