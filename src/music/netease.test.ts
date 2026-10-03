@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseLyrics, mapNeteaseAlbums, mapNeteaseSongs, parseNeteaseTrial, NeteaseProvider } from "./netease.js";
+import {
+  parseLyrics,
+  mapNeteaseAlbums,
+  mapNeteaseSongs,
+  mapNeteaseArtists,
+  parseNeteaseTrial,
+  NeteaseProvider,
+} from "./netease.js";
 
 describe("NetEase adapter", () => {
   it("parses LRC format lyrics", () => {
@@ -138,6 +145,75 @@ describe("NeteaseProvider.search pagination", () => {
     expect(callByType(get, 1000).offset).toBe(0);
     expect(callByType(get, 10).offset).toBe(0);
   });
+
+  it("requests artists (type=100) and returns them alongside songs/albums/playlists", async () => {
+    const p = new NeteaseProvider("http://x");
+    const get = vi.fn(async (_path: string, cfg: any) => ({
+      data:
+        cfg.params.type === 100
+          ? { result: { artists: [{ id: 6452, name: "Adele", picUrl: "http://p/1.jpg", musicSize: 120 }] } }
+          : { result: { songs: [], playlists: [], albums: [] } },
+    }));
+    (p as any).api = { get };
+
+    const res = await p.search("adele", 20, 0);
+
+    expect(callByType(get, 100).limit).toBe(20);
+    expect(callByType(get, 100).offset).toBe(0);
+    expect(res.artists).toEqual([
+      {
+        id: "6452",
+        name: "Adele",
+        avatarUrl: "http://p/1.jpg",
+        aliases: [],
+        songCount: 120,
+        albumCount: undefined,
+        platform: "netease",
+      },
+    ]);
+  });
+});
+
+describe("mapNeteaseArtists (artist search + detail)", () => {
+  it("maps cloudsearch type=100 artist entries", () => {
+    const out = mapNeteaseArtists([
+      {
+        id: 6452,
+        name: "Adele",
+        picUrl: "http://p/1.jpg",
+        alias: ["阿黛尔"],
+        musicSize: 120,
+        albumSize: 9,
+      },
+    ]);
+    expect(out).toEqual([
+      {
+        id: "6452",
+        name: "Adele",
+        avatarUrl: "http://p/1.jpg",
+        aliases: ["阿黛尔"],
+        songCount: 120,
+        albumCount: 9,
+        platform: "netease",
+      },
+    ]);
+  });
+
+  it("falls back to img1v1Url/alia and drops non-string or empty aliases", () => {
+    const out = mapNeteaseArtists([
+      { id: 1, name: "X", img1v1Url: "http://p/2.jpg", alia: ["a", "", null, 3] },
+    ]);
+    expect(out[0].avatarUrl).toBe("http://p/2.jpg");
+    expect(out[0].aliases).toEqual(["a"]);
+    expect(out[0].songCount).toBeUndefined();
+    expect(out[0].albumCount).toBeUndefined();
+  });
+
+  it("returns [] for empty/null input", () => {
+    expect(mapNeteaseArtists([])).toEqual([]);
+    expect(mapNeteaseArtists(null as any)).toEqual([]);
+    expect(mapNeteaseArtists(undefined as any)).toEqual([]);
+  });
 });
 
 describe("NeteaseProvider per-user login (#164)", () => {
@@ -182,5 +258,59 @@ describe("NeteaseProvider per-user login (#164)", () => {
     expect(get.mock.calls[0][1].params.cookie).toBe("MUSIC_U=personal");
     expect(p.getCookie()).toBe("MUSIC_U=shared");
     expect(personal.platform).toBe("netease");
+  });
+});
+
+describe("NeteaseProvider.getArtistAllSongs (全部歌曲 paging)", () => {
+  const rawSongs = [
+    { id: 1, name: "A", artists: [{ name: "X" }], album: { name: "Al" }, duration: 200000, fee: 0 },
+    { id: 2, name: "B", artists: [{ name: "X" }], album: { name: "Al" }, duration: 100000, fee: 0 },
+  ];
+
+  function withGet(p: NeteaseProvider, impl: (path: string, cfg: any) => any) {
+    const get = vi.fn(async (path: string, cfg: any) => ({ data: impl(path, cfg) }));
+    (p as any).api = { get };
+    return get;
+  }
+
+  it("pages /artist/songs with order=hot and reports total/hasMore", async () => {
+    const p = new NeteaseProvider("http://x");
+    const get = withGet(p, () => ({ songs: rawSongs, total: 345, more: true }));
+
+    const page = await p.getArtistAllSongs("46487", 50, 50);
+
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(get.mock.calls[0][0]).toBe("/artist/songs");
+    expect(get.mock.calls[0][1].params).toMatchObject({
+      id: "46487",
+      limit: 50,
+      offset: 50,
+      order: "hot",
+    });
+    expect(page.songs.map((s) => s.id)).toEqual(["1", "2"]);
+    expect(page.total).toBe(345);
+    expect(page.hasMore).toBe(true);
+  });
+
+  it("derives hasMore from total when the upstream omits `more`", async () => {
+    const p = new NeteaseProvider("http://x");
+    withGet(p, (_path, cfg) => ({
+      songs: rawSongs.slice(cfg.params.offset, cfg.params.offset + cfg.params.limit),
+      total: 2,
+    }));
+
+    expect((await p.getArtistAllSongs("1", 0, 1)).hasMore).toBe(true);
+    expect((await p.getArtistAllSongs("1", 1, 1)).hasMore).toBe(false);
+  });
+
+  it("clamps limit to 100, offset to >= 0, and derives a total when absent", async () => {
+    const p = new NeteaseProvider("http://x");
+    const get = withGet(p, () => ({ songs: rawSongs }));
+
+    const page = await p.getArtistAllSongs("1", -5, 500);
+
+    expect(get.mock.calls[0][1].params).toMatchObject({ limit: 100, offset: 0 });
+    expect(page.total).toBe(2);
+    expect(page.hasMore).toBe(false);
   });
 });

@@ -10,6 +10,9 @@ import type {
   QrCodeResult,
   AuthStatus,
   Album,
+  Artist,
+  ArtistDetail,
+  ArtistSongPage,
 } from "./provider.js";
 
 export function parseLyrics(lrc: string, tlyric?: string): LyricLine[] {
@@ -65,6 +68,21 @@ export function mapNeteaseAlbums(raw: any[] | null | undefined): Album[] {
     artist: (a.artists ?? []).map((x: any) => x.name).join(" / "),
     coverUrl: a.picUrl ?? "",
     songCount: a.size ?? 0,
+    platform: "netease",
+  }));
+}
+
+export function mapNeteaseArtists(raw: any[] | null | undefined): Artist[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((a: any) => ({
+    id: String(a.id),
+    name: a.name ?? "",
+    avatarUrl: a.picUrl ?? a.img1v1Url ?? "",
+    aliases: (a.alias ?? a.alia ?? []).filter(
+      (x: unknown): x is string => typeof x === "string" && x.length > 0
+    ),
+    songCount: a.musicSize ?? undefined,
+    albumCount: a.albumSize ?? undefined,
     platform: "netease",
   }));
 }
@@ -137,7 +155,7 @@ export class NeteaseProvider implements MusicProvider {
     // /cloudsearch supports offset for every type. Songs, playlists (type 1000)
     // and albums (type 10) are all limit/offset-driven so the web can page past
     // the first page (playlists/albums were previously hardcoded to limit: 10).
-    const [songRes, playlistRes, albumRes] = await Promise.all([
+    const [songRes, playlistRes, albumRes, artistRes] = await Promise.all([
       this.api.get("/cloudsearch", {
         params: { keywords: query, type: 1, limit, offset, ...this.cookieParams },
       }),
@@ -152,6 +170,9 @@ export class NeteaseProvider implements MusicProvider {
       }),
       this.api.get("/cloudsearch", {
         params: { keywords: query, type: 10, limit, offset, ...this.cookieParams },
+      }),
+      this.api.get("/cloudsearch", {
+        params: { keywords: query, type: 100, limit, offset, ...this.cookieParams },
       }),
     ]);
 
@@ -169,7 +190,9 @@ export class NeteaseProvider implements MusicProvider {
 
     const albums = mapNeteaseAlbums(albumRes.data?.result?.albums);
 
-    return { songs, playlists, albums };
+    const artists = mapNeteaseArtists(artistRes.data?.result?.artists);
+
+    return { songs, playlists, albums, artists };
   }
 
   async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
@@ -215,6 +238,69 @@ export class NeteaseProvider implements MusicProvider {
       params: { id: albumId, ...this.cookieParams },
     });
     return mapNeteaseSongs(res.data?.songs);
+  }
+
+  async getArtistDetail(artistId: string): Promise<ArtistDetail | null> {
+    // /artists returns { artist, hotSongs }; the hot songs are fetched
+    // separately via /artist/songs (order=hot) so the artist page's three
+    // upstream calls stay independent of each other.
+    const res = await this.api.get("/artists", {
+      params: { id: artistId, ...this.cookieParams },
+    });
+    const a = res.data?.artist;
+    if (!a) return null;
+    return {
+      ...mapNeteaseArtists([a])[0],
+      description: a.briefDesc ?? "",
+    };
+  }
+
+  async getArtistSongs(artistId: string, limit = 50): Promise<Song[]> {
+    const res = await this.api.get("/artist/songs", {
+      params: {
+        id: artistId,
+        limit,
+        offset: 0,
+        order: "hot",
+        ...this.cookieParams,
+      },
+    });
+    return mapNeteaseSongs(res.data?.songs);
+  }
+
+  async getArtistAlbums(artistId: string, limit = 20): Promise<Album[]> {
+    const res = await this.api.get("/artist/album", {
+      params: { id: artistId, limit, offset: 0, ...this.cookieParams },
+    });
+    return mapNeteaseAlbums(res.data?.hotAlbums);
+  }
+
+  /**
+   * Full catalogue page for the artist page's "全部歌曲" list: /artist/songs
+   * supports real offset paging (Adele reports total 345 with more=true, and
+   * offset=50/100/150 each return a fresh slice of 50). order=hot keeps the page
+   * ordering identical to getArtistSongs so the hot preview and the full list
+   * are one continuous ranking.
+   */
+  async getArtistAllSongs(artistId: string, offset = 0, limit = 50): Promise<ArtistSongPage> {
+    const safeOffset = Math.max(0, Math.trunc(offset) || 0);
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 50, 100));
+    const res = await this.api.get("/artist/songs", {
+      params: {
+        id: artistId,
+        limit: safeLimit,
+        offset: safeOffset,
+        order: "hot",
+        ...this.cookieParams,
+      },
+    });
+    const songs = mapNeteaseSongs(res.data?.songs);
+    const reported = Number(res.data?.total);
+    const total = Number.isFinite(reported) && reported > 0 ? reported : safeOffset + songs.length;
+    const more = res.data?.more;
+    const hasMore =
+      typeof more === "boolean" ? more : safeOffset + songs.length < total;
+    return { songs, total, hasMore };
   }
 
   async getLyrics(songId: string): Promise<LyricLine[]> {
