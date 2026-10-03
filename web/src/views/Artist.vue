@@ -46,7 +46,7 @@
               播放
             </button>
             <button
-              v-if="canPlayAll"
+              v-if="canShuffle"
               class="shuffle-btn"
               :disabled="!artist"
               title="随机播放该歌手的全部歌曲"
@@ -139,12 +139,16 @@ const { can, guestCan } = useSession();
 // Same permission as "play all" on a playlist: members need player.control,
 // guests need the playCollection flag.
 const canPlayAll = computed(() => can('player.control') || guestCan('playCollection'));
+const canShuffle = computed(() =>
+  canPlayAll.value && (can('player.control') || guestCan('playMode')),
+);
 
 const artist = ref<ArtistDetail | null>(null);
 const hotSongs = ref<Song[]>([]);
 const albums = ref<Album[]>([]);
 const loading = ref(true);
 const expanded = ref(false);
+let artistRequest = 0;
 
 const platform = computed(() => (route.query.platform as string) || 'netease');
 const platformLabel = computed(() => (platform.value === 'qq' ? 'QQ 音乐' : '网易云音乐'));
@@ -164,13 +168,19 @@ async function playAll() {
 }
 
 async function shuffleAll() {
+  if (!canShuffle.value) return;
   // Shuffle reuses the queue's own random mode (the same switch the player
   // toolbar exposes), so the play button and the mode badge stay consistent.
-  await store.setMode('random');
-  await store.playArtist(artistId(), platform.value);
+  try {
+    await store.setMode('random');
+    await store.playArtist(artistId(), platform.value);
+  } catch (err: any) {
+    store.notify(err?.response?.status === 403 ? '没有权限切换随机播放' : '切换随机播放失败', 'error');
+  }
 }
 
 async function loadArtist() {
+  const request = ++artistRequest;
   loading.value = true;
   // Reset every per-artist piece: RouterView reuses this component when only the
   // route params change, so artist → artist navigation must not show stale rows.
@@ -182,13 +192,16 @@ async function loadArtist() {
     const res = await axios.get(`/api/music/artist/${artistId()}`, {
       params: { platform: platform.value },
     });
+    if (request !== artistRequest) return;
     artist.value = res.data?.artist ?? null;
     hotSongs.value = res.data?.songs ?? [];
     albums.value = res.data?.albums ?? [];
   } catch {
+    if (request !== artistRequest) return;
     artist.value = null;
+  } finally {
+    if (request === artistRequest) loading.value = false;
   }
-  loading.value = false;
 }
 
 onMounted(loadArtist);
