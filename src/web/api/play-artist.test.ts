@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { collectArtistSongs } from "./player.js";
 import type { ArtistSongPage, Song } from "../../music/provider.js";
+import express from "express";
+import request from "supertest";
+import { createPlayerRouter } from "./player.js";
+import { BotInstance } from "../../bot/instance.js";
+import { PlayQueue } from "../../audio/queue.js";
 
 function song(id: string): Song {
   return {
@@ -48,6 +53,11 @@ describe("collectArtistSongs (play-artist all:true)", () => {
     expect(fetchPage).toHaveBeenCalledTimes(5);
   });
 
+  it("enforces the song cap even when an upstream page exceeds the requested limit", async () => {
+    const fetchPage = vi.fn(async () => page(Array.from({ length: 600 }, (_, i) => String(i)), 600, false));
+    expect(await collectArtistSongs(fetchPage, "a")).toHaveLength(500);
+  });
+
   it("stops on an empty page even when hasMore claims otherwise", async () => {
     const fetchPage = vi.fn(async () => page([], 9, true));
 
@@ -62,5 +72,58 @@ describe("collectArtistSongs (play-artist all:true)", () => {
 
     expect(songs.map((s) => s.id)).toEqual(["1"]);
     expect(fetchPage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("play-artist playback serialization", () => {
+  it("keeps the queue and audible song consistent when single-song playback overlaps artist playback", async () => {
+    const queue = new PlayQueue();
+    let audible: string | null = null;
+    let releaseArtist!: () => void;
+    let notifyArtistStarted!: () => void;
+    let notifySingleArrived!: () => void;
+    const artistStarted = new Promise<void>((resolve) => { notifyArtistStarted = resolve; });
+    const artistHold = new Promise<void>((resolve) => { releaseArtist = resolve; });
+    const singleArrived = new Promise<void>((resolve) => { notifySingleArrived = resolve; });
+    const bot: any = {
+      playGate: Promise.resolve(),
+      getProviderFor: () => ({ platform: "netease", getArtistSongs: async () => [song("A")], getArtistAllSongs: async () => page(["A"], 1, false) }),
+      getPlayer: () => ({ stop: () => { audible = null; }, resetFailures: () => {} }),
+      getQueueManager: () => queue,
+      resolveAndPlay: async (track: Song) => {
+        notifyArtistStarted();
+        await artistHold;
+        audible = track.id;
+        return true;
+      },
+      playSingleSong: async (track: Song) => {
+        queue.clear();
+        queue.add(track);
+        queue.play();
+        audible = track.id;
+        return true;
+      },
+    };
+    bot.runExclusive = (fn: () => Promise<unknown>) => BotInstance.prototype.runExclusive.call(bot, fn);
+    const app = express();
+    app.use(express.json());
+    app.use((req, _res, next) => { (req as any).user = { role: "admin" }; next(); });
+    app.use("/api/player/b/play-song", (_req, _res, next) => { notifySingleArrived(); next(); });
+    app.use("/api/player", createPlayerRouter({ getBot: () => bot } as any, { error: vi.fn() } as any));
+    const artistRequest = request(app).post("/api/player/b/play-artist").send({ artistId: "artist", platform: "netease" }).then((res) => res);
+    await artistStarted;
+    const singleRequest = request(app).post("/api/player/b/play-song").send({ song: song("B") }).then((res) => res);
+    // Let the overlapping HTTP request enter the real route while A's URL is pending.
+    await singleArrived;
+    await Promise.resolve();
+    await Promise.resolve();
+    const whileArtistPending = queue.current()?.id;
+    releaseArtist();
+    const [artistResponse, singleResponse] = await Promise.all([artistRequest, singleRequest]);
+    expect(artistResponse.status).toBe(200);
+    expect(singleResponse.status).toBe(200);
+    expect(whileArtistPending).toBe("A");
+    expect(queue.current()?.id).toBe("B");
+    expect(audible).toBe("B");
   });
 });

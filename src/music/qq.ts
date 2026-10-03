@@ -59,11 +59,28 @@ function isArtistAlbum(a: any, artistId: string): boolean {
  *  album, so the merged list is memoised per singer for a while. */
 const ARTIST_CATALOG_TTL_MS = 10 * 60 * 1000;
 const ARTIST_CATALOG_MAX_ENTRIES = 20;
-/** Album search pages to walk (50 albums each) and the hard cap on albums we
- *  are willing to fetch songs for. */
-const ARTIST_ALBUM_MAX_PAGES = 3;
-const ARTIST_ALBUM_MAX = 50;
+/** Bound pathological search responses even when every album is empty or all
+ *  tracks are duplicates. Hitting this guard is an incomplete, uncached scan. */
+const ARTIST_ALBUM_MAX_PAGES = 100;
 const ARTIST_ALBUM_CONCURRENCY = 5;
+const ARTIST_CATALOG_MAX_SONGS = 500;
+
+interface ArtistCatalog {
+  songs: Song[];
+  total: number;
+  incomplete: boolean;
+}
+
+/** A malformed row must not disappear in the mapper and make an incomplete
+ *  artist catalogue look like a successful, cacheable empty album. */
+function isQqSongRow(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const song = raw as Record<string, unknown>;
+  const id = song.mid ?? song.songmid ?? song.songMID ?? song.id ?? song.songid ?? song.songId;
+  return typeof id === "string"
+    ? id.trim().length > 0
+    : typeof id === "number" && Number.isSafeInteger(id) && id > 0;
+}
 
 export function mapQqSongs(raw: any[] | null | undefined): Song[] {
   if (!Array.isArray(raw)) return [];
@@ -530,7 +547,16 @@ export class QQMusicProvider implements MusicProvider {
     const res = await this.api.get("/getAlbumInfo", {
       params: { albummid: albumId, ...this.cookieParams },
     });
-    return mapQqSongs(res.data?.response?.data?.list ?? []);
+    const response = res.data?.response;
+    const list = response?.data?.list;
+    if (
+      (res.data?.code != null && Number(res.data.code) !== 0) ||
+      (response?.code != null && Number(response.code) !== 0) ||
+      !Array.isArray(list) || !list.every(isQqSongRow)
+    ) {
+      throw new Error("QQ album-song lookup failed");
+    }
+    return mapQqSongs(list);
   }
 
   /** music.web_singer_info_svr / get_singer_detail_info — singer info plus up
@@ -553,7 +579,16 @@ export class QQMusicProvider implements MusicProvider {
       const res = await qqMusicuApi.get("/cgi-bin/musicu.fcg", {
         params: { format: "json", data: reqData },
       });
-      return res.data?.req_0?.data ?? null;
+      const response = res.data?.req_0;
+      const data = response?.data;
+      if (
+        (res.data?.code != null && Number(res.data.code) !== 0) ||
+        (response?.code != null && Number(response.code) !== 0) ||
+        typeof data?.singer_info?.name !== "string" ||
+        !data.singer_info.name ||
+        !Array.isArray(data.songlist) || !data.songlist.every(isQqSongRow)
+      ) return null;
+      return data;
     } catch {
       return null;
     }
@@ -591,94 +626,86 @@ export class QQMusicProvider implements MusicProvider {
    */
   async getArtistAllSongs(artistId: string, offset = 0, limit = 50): Promise<ArtistSongPage> {
     const catalogue = await this.buildArtistCatalog(artistId);
-    const safeOffset = Math.max(0, Math.trunc(offset) || 0);
-    const safeLimit = Math.max(1, Math.min(Math.trunc(limit) || 50, 100));
-    const songs = catalogue.slice(safeOffset, safeOffset + safeLimit);
+    const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.trunc(offset)) : 0;
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(Math.trunc(limit) || 50, 100)) : 50;
+    const songs = catalogue.songs.slice(safeOffset, safeOffset + safeLimit);
     return {
       songs,
-      total: catalogue.length,
-      hasMore: safeOffset + songs.length < catalogue.length,
+      total: catalogue.total,
+      hasMore: safeOffset + songs.length < catalogue.total || catalogue.incomplete,
     };
   }
 
   /** Memoised full catalogues, keyed by singer MID (see ARTIST_CATALOG_TTL_MS). */
-  private artistCatalog = new Map<string, { at: number; songs: Song[] }>();
+  private artistCatalog = new Map<string, { at: number; catalogue: ArtistCatalog }>();
 
-  private async buildArtistCatalog(artistId: string): Promise<Song[]> {
+  private async buildArtistCatalog(artistId: string): Promise<ArtistCatalog> {
     const cached = this.artistCatalog.get(artistId);
-    if (cached && Date.now() - cached.at < ARTIST_CATALOG_TTL_MS) return cached.songs;
+    if (cached && Date.now() - cached.at < ARTIST_CATALOG_TTL_MS) return cached.catalogue;
 
     const merged: Song[] = [];
     const seen = new Set<string>();
     const push = (song: Song) => {
       if (!song.id || seen.has(song.id)) return;
       seen.add(song.id);
-      merged.push(song);
+      if (merged.length < ARTIST_CATALOG_MAX_SONGS) merged.push(song);
     };
 
-    for (const song of await this.getArtistSongs(artistId, 50)) push(song);
-
-    // null = the album search could not be enumerated (transient upstream
-    // failure). The hot list is still returned, but such a degraded catalogue
-    // must NOT be cached: a 10-minute cache would silently turn "play the whole
-    // singer" into "play the hot 50".
-    const albumIds = await this.fetchArtistAlbumIds(artistId);
-    let albumFetchFailed = false;
-    for (let i = 0; albumIds && i < albumIds.length; i += ARTIST_ALBUM_CONCURRENCY) {
-      const batch = albumIds.slice(i, i + ARTIST_ALBUM_CONCURRENCY);
-      const lists = await Promise.all(
-        batch.map((mid) =>
-          this.getAlbumSongs(mid).catch(() => {
-            albumFetchFailed = true;
-            return [] as Song[];
-          })
-        )
-      );
-      for (const list of lists) {
-        for (const song of list) push(song);
+    const hot = await this.fetchSingerDetail(artistId, 50);
+    for (const song of mapQqSongs(hot?.songlist)) push(song);
+    const detail = await this.fetchSingerDetail(artistId, 1);
+    const name = detail?.singer_info?.name;
+    let failed = !hot || !detail;
+    let complete = false;
+    const albumIds = new Set<string>();
+    const searchAlbumIds = new Set<string>();
+    if (name) {
+      for (let page = 1; page <= ARTIST_ALBUM_MAX_PAGES && merged.length < ARTIST_CATALOG_MAX_SONGS; page++) {
+        const list = (await this.searchArtistAlbums(name, page, 50)) ?? (await this.searchArtistAlbums(name, page, 50));
+        if (list === null) { failed = true; break; }
+        if (list.length === 0) { complete = true; break; }
+        const batchIds: string[] = [];
+        let freshSearchEntries = 0;
+        for (const entry of list) {
+          const mid = String(entry?.albumMID ?? entry?.album_mid ?? "");
+          if (!mid) { failed = true; continue; }
+          if (!searchAlbumIds.has(mid)) { searchAlbumIds.add(mid); freshSearchEntries++; }
+          if (isArtistAlbum(entry, artistId) && !albumIds.has(mid)) {
+            albumIds.add(mid);
+            batchIds.push(mid);
+          }
+        }
+        // Repeated pages cannot prove exhaustion, but must not loop forever.
+        if (freshSearchEntries === 0) { failed = true; break; }
+        let fetchedAlbums = 0;
+        for (let i = 0; i < batchIds.length && merged.length < ARTIST_CATALOG_MAX_SONGS; i += ARTIST_ALBUM_CONCURRENCY) {
+          const batch = batchIds.slice(i, i + ARTIST_ALBUM_CONCURRENCY);
+          const lists = await Promise.all(batch.map((mid) =>
+            this.getAlbumSongs(mid).catch(() => { failed = true; return [] as Song[]; })
+          ));
+          fetchedAlbums += batch.length;
+          for (const songs of lists) for (const song of songs) push(song);
+        }
+        if (list.length < 50 && fetchedAlbums === batchIds.length && seen.size <= ARTIST_CATALOG_MAX_SONGS) { complete = true; break; }
       }
     }
-
-    if (albumIds !== null && !albumFetchFailed) {
+    const incomplete = failed || !complete;
+    const reported = Math.max(0, ...[hot?.total_song, detail?.total_song].map((n) => Number.isFinite(Number(n)) ? Math.trunc(Number(n)) : 0));
+    const catalogue: ArtistCatalog = {
+      songs: merged,
+      total: incomplete ? Math.max(seen.size, reported, merged.length === ARTIST_CATALOG_MAX_SONGS ? ARTIST_CATALOG_MAX_SONGS + 1 : 0) : merged.length,
+      incomplete,
+    };
+    // Cache complete catalogues and intentional 500-song truncation only.
+    // Failure, repeated pages and an exhausted scan budget must remain retryable.
+    if (!failed && (complete || merged.length === ARTIST_CATALOG_MAX_SONGS)) {
       if (this.artistCatalog.size >= ARTIST_CATALOG_MAX_ENTRIES) {
         const oldest = this.artistCatalog.keys().next().value;
         if (oldest !== undefined) this.artistCatalog.delete(oldest);
       }
-      this.artistCatalog.set(artistId, { at: Date.now(), songs: merged });
+      this.artistCatalog.set(artistId, { at: Date.now(), catalogue });
     }
-    return merged;
-  }
-
-  /** Every album MID the singer owns, via paged album search (see getArtistAlbums).
-   *  null = the search failed, so the album list is unknown (not empty). */
-  private async fetchArtistAlbumIds(artistId: string): Promise<string[] | null> {
-    const detail = await this.fetchSingerDetail(artistId, 1);
-    const name = detail?.singer_info?.name;
-    if (!name) return [];
-    const ids: string[] = [];
-    const seen = new Set<string>();
-    for (let page = 1; page <= ARTIST_ALBUM_MAX_PAGES; page++) {
-      // One immediate retry absorbs a transient upstream hiccup, which would
-      // otherwise look exactly like "this singer has no albums".
-      const list =
-        (await this.searchArtistAlbums(name, page, 50)) ?? (await this.searchArtistAlbums(name, page, 50));
-      if (list === null) return null;
-      if (list.length === 0) break;
-      let added = 0;
-      for (const entry of list) {
-        if (!isArtistAlbum(entry, artistId)) continue;
-        const mid = String(entry?.albumMID ?? entry?.album_mid ?? "");
-        if (mid && !seen.has(mid)) {
-          seen.add(mid);
-          ids.push(mid);
-          added++;
-        }
-      }
-      if (ids.length >= ARTIST_ALBUM_MAX) break;
-      // A page that adds nothing means the search has drifted off this singer.
-      if (added === 0) break;
-    }
-    return ids.slice(0, ARTIST_ALBUM_MAX);
+    return catalogue;
   }
 
   /** search_type=2 album search for a singer name — raw entries, null on failure. */
@@ -703,7 +730,14 @@ export class QQMusicProvider implements MusicProvider {
       const res = await qqMusicuApi.get("/cgi-bin/musicu.fcg", {
         params: { format: "json", data: reqData },
       });
-      return res.data?.req_album?.data?.body?.album?.list ?? [];
+      const response = res.data?.req_album;
+      const list = response?.data?.body?.album?.list;
+      if (
+        (res.data?.code != null && Number(res.data.code) !== 0) ||
+        (response?.code != null && Number(response.code) !== 0) ||
+        !Array.isArray(list)
+      ) return null;
+      return list;
     } catch {
       return null;
     }

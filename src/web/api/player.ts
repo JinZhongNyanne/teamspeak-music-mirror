@@ -26,6 +26,7 @@ export async function collectArtistSongs(
       if (!seen.has(song.id)) {
         seen.add(song.id);
         songs.push(song);
+        if (songs.length === MAX_ARTIST_QUEUE) return songs;
       }
     }
     if (!page.hasMore || page.songs.length === 0) break;
@@ -524,10 +525,6 @@ export function createPlayerRouter(
       // safety cap); otherwise the hot songs are the best it can offer.
       const fetchPage = provider.getArtistAllSongs?.bind(provider);
 
-      // Stop current playback
-      bot.getPlayer().stop();
-      bot.getPlayer().resetFailures();
-
       const songs = fetchPage
         ? await collectArtistSongs(fetchPage, artistId)
         : await provider.getArtistSongs(artistId, 50);
@@ -552,37 +549,40 @@ export function createPlayerRouter(
         return;
       }
 
-      const queue = bot.getQueueManager();
-      queue.clear();
-      for (const song of queueable) {
-        queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
-      }
-      // Sweep AFTER the queue is rebuilt (see play-playlist).
-      bot.cleanupQueuedLocalSongs?.("queue_replaced");
+      // Catalogue and copyright lookups leave current playback running. Only
+      // the queue replacement and playback itself occupy the shared play gate.
+      const body = await bot.runExclusive(async () => {
+        bot.getPlayer().stop();
+        bot.getPlayer().resetFailures();
+        const queue = bot.getQueueManager();
+        queue.clear();
+        for (const song of queueable) {
+          queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
+        }
+        // Sweep AFTER the queue is rebuilt (see play-playlist).
+        bot.cleanupQueuedLocalSongs?.("queue_replaced");
 
-      const mode = queue.getMode();
-      let first;
-      if (mode === "random" || mode === "rloop") {
-        const idx = Math.floor(Math.random() * queue.size());
-        first = queue.playAt(idx);
-      } else {
-        first = queue.play();
-      }
+        const mode = queue.getMode();
+        let first;
+        if (mode === "random" || mode === "rloop") {
+          const idx = Math.floor(Math.random() * queue.size());
+          first = queue.playAt(idx);
+        } else {
+          first = queue.play();
+        }
 
-      let started = first ? await bot.resolveAndPlay(first) : false;
-      if (first && !started) {
-        started = await bot.playNext(20);
-      }
+        let started = first ? await bot.resolveAndPlay(first) : false;
+        if (first && !started) started = await bot.playNext(20);
 
-      const playing = queue.current();
-      const loadedMsg = queueable.length < totalCount
-        ? `已加载 ${queueable.length}/${totalCount} 首（其余区域/版权限制）`
-        : `已加载 ${queueable.length} 首`;
-      if (started && playing) {
-        res.json({ ok: true, message: `${loadedMsg}，正在播放：${playing.name}` });
-      } else {
-        res.json({ ok: false, message: `${loadedMsg}，但无法开始播放。` });
-      }
+        const playing = queue.current();
+        const loadedMsg = queueable.length < totalCount
+          ? `已加载 ${queueable.length}/${totalCount} 首（其余区域/版权限制）`
+          : `已加载 ${queueable.length} 首`;
+        return started && playing
+          ? { ok: true, message: `${loadedMsg}，正在播放：${playing.name}` }
+          : { ok: false, message: `${loadedMsg}，但无法开始播放。` };
+      });
+      res.json(body);
     } catch (err) {
       logger.error({ err }, "play-artist failed");
       res.status(500).json({ error: (err as Error).message });
