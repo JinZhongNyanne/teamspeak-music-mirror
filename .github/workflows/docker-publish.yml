@@ -37,6 +37,8 @@ jobs:
       platforms: ${{ steps.config.outputs.platforms }}
       base_image: ${{ steps.config.outputs.base_image }}
       extra_tag: ${{ steps.config.outputs.extra_tag }}
+      release_archive: ${{ steps.config.outputs.release_archive }}
+      archive_platform: ${{ steps.config.outputs.archive_platform }}
     steps:
       - name: Validate image configuration
         id: config
@@ -47,6 +49,8 @@ jobs:
           IMAGE_PLATFORMS: ${{ inputs.platforms || vars.IMAGE_PLATFORMS || 'linux/amd64,linux/arm64' }}
           NODE_IMAGE: ${{ inputs.base_image || vars.NODE_IMAGE || 'node:22-bookworm-slim' }}
           IMAGE_EXTRA_TAG: ${{ inputs.image_tag || vars.IMAGE_EXTRA_TAG }}
+          DOCKER_RELEASE_ARCHIVE: ${{ vars.DOCKER_RELEASE_ARCHIVE || 'true' }}
+          DOCKER_ARCHIVE_PLATFORM: ${{ vars.DOCKER_ARCHIVE_PLATFORM || 'linux/amd64' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -67,6 +71,13 @@ jobs:
           if [[ -n "$IMAGE_EXTRA_TAG" && ! "$IMAGE_EXTRA_TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]]; then
             echo 'Invalid IMAGE_EXTRA_TAG' >&2; exit 1
           fi
+          if [[ "$DOCKER_RELEASE_ARCHIVE" != true && "$DOCKER_RELEASE_ARCHIVE" != false ]]; then
+            echo 'Invalid DOCKER_RELEASE_ARCHIVE (true or false)' >&2; exit 1
+          fi
+          if [[ "$DOCKER_ARCHIVE_PLATFORM" != linux/amd64 && "$DOCKER_ARCHIVE_PLATFORM" != linux/arm64 ]]; then
+            echo 'Invalid DOCKER_ARCHIVE_PLATFORM' >&2; exit 1
+          fi
+          printf 'release_archive=%s\narchive_platform=%s\n' "$DOCKER_RELEASE_ARCHIVE" "$DOCKER_ARCHIVE_PLATFORM" >> "$GITHUB_OUTPUT"
           printf 'registry=%s\nimage=%s/%s\nplatforms=%s\nbase_image=%s\nextra_tag=%s\n' \
             "$registry" "$registry" "$image_name" "$IMAGE_PLATFORMS" "$NODE_IMAGE" "$IMAGE_EXTRA_TAG" >> "$GITHUB_OUTPUT"
 
@@ -185,3 +196,127 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=music-mirror
           cache-to: type=gha,scope=music-mirror,mode=max
+
+  # Contents-readable fallback, independent of GHCR publishing and package access.
+  private-release:
+    if: github.event_name != 'pull_request' && github.event.repository.private == true && needs.configuration.outputs.release_archive == 'true'
+    needs: [test, configuration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+    steps:
+      - name: Verify repository is private
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.request
+          url = f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}"
+          req = urllib.request.Request(url, headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'})
+          try:
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  repository = json.load(response)
+          except (urllib.error.HTTPError, urllib.error.URLError):
+              raise SystemExit('Cannot verify repository privacy')
+          if repository.get('private') is not True:
+              raise SystemExit('Release archive delivery requires a private repository')
+          PY
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build private Docker archive
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scripts/docker/Dockerfile
+          platforms: ${{ needs.configuration.outputs.archive_platform }}
+          push: false
+          tags: ${{ needs.configuration.outputs.image }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          build-args: |
+            NODE_IMAGE=${{ needs.configuration.outputs.base_image }}
+          outputs: type=docker,dest=${{ runner.temp }}/teamspeak-music-mirror-image.tar
+          cache-from: type=gha,scope=music-mirror
+          cache-to: type=gha,scope=music-mirror,mode=max
+      - name: Compress archive and record SHA256
+        env:
+          IMAGE: ${{ needs.configuration.outputs.image }}:sha-${{ github.sha }}
+          PLATFORM: ${{ needs.configuration.outputs.archive_platform }}
+        run: |
+          python3 - <<'PY'
+          import gzip, hashlib, json, os, pathlib, shutil
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          archive = temp / 'teamspeak-music-mirror-image.tar.gz'
+          with (temp / 'teamspeak-music-mirror-image.tar').open('rb') as source, gzip.open(archive, 'wb', compresslevel=1) as target:
+              shutil.copyfileobj(source, target)
+          with archive.open('rb') as source:
+              digest = hashlib.file_digest(source, 'sha256').hexdigest()
+          manifest = {'image': os.environ['IMAGE'], 'revision': os.environ['GITHUB_SHA'], 'platform': os.environ['PLATFORM'], 'archive': archive.name, 'sha256': digest}
+          (temp / 'image-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          (temp / 'SHA256SUMS').write_text(f'{digest}  {archive.name}\n')
+          PY
+      - name: Deliver private Release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, urllib.error, urllib.parse, urllib.request
+          api = os.environ['GITHUB_API_URL'].rstrip('/')
+          repo = os.environ['GITHUB_REPOSITORY']
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+
+          def request(url, method='GET', data=None, content_type='application/json', allow_missing=False):
+              payload = json.dumps(data).encode() if isinstance(data, dict) else data
+              req = urllib.request.Request(url, data=payload, method=method, headers={**headers, 'Content-Type': content_type})
+              try:
+                  with urllib.request.urlopen(req, timeout=120) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  if allow_missing and error.code == 404:
+                      return None
+                  raise SystemExit(f'Release delivery failed ({method}, HTTP {error.code})')
+              except urllib.error.URLError:
+                  raise SystemExit('Release delivery failed (network error)')
+
+          repository = request(f'{api}/repos/{repo}')
+          if repository.get('private') is not True:
+              raise SystemExit('Release delivery requires a private repository')
+          tag = f"image-{os.environ['GITHUB_SHA']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          manifest = json.loads((temp / 'image-manifest.json').read_text())
+          status = {**manifest, 'status': 'archive_pending'}
+          release = request(f'{api}/repos/{repo}/releases/tags/{urllib.parse.quote(tag, safe="")}', allow_missing=True)
+          if release is None:
+              release = request(f'{api}/repos/{repo}/releases', 'POST', {'tag_name': tag, 'target_commitish': os.environ['GITHUB_SHA'], 'name': tag, 'body': json.dumps(status, indent=2), 'draft': False, 'prerelease': True, 'make_latest': 'false'})
+          elif release.get('prerelease') is not True or release.get('draft') is not False or release.get('target_commitish') != os.environ['GITHUB_SHA']:
+              raise SystemExit('Existing image release has unexpected state')
+          upload_url = release['upload_url'].split('{', 1)[0]
+          parsed = urllib.parse.urlparse(upload_url)
+          if parsed.scheme != 'https' or parsed.hostname != 'uploads.github.com':
+              raise SystemExit('Unexpected release upload host')
+          assets = {asset['name']: asset for asset in release.get('assets', [])}
+          for name, content_type in [('teamspeak-music-mirror-image.tar.gz', 'application/gzip'), ('image-manifest.json', 'application/json'), ('SHA256SUMS', 'text/plain')]:
+              data = (temp / name).read_bytes()
+              expected_digest = 'sha256:' + hashlib.sha256(data).hexdigest()
+              existing = assets.get(name)
+              if existing:
+                  if existing.get('state') != 'uploaded' or existing.get('digest') != expected_digest:
+                      raise SystemExit('Existing release asset differs or cannot be verified; rerun with a new attempt')
+              else:
+                  uploaded = request(upload_url + '?' + urllib.parse.urlencode({'name': name}), 'POST', data, content_type)
+                  if uploaded.get('state') != 'uploaded' or uploaded.get('digest') != expected_digest:
+                      raise SystemExit('Uploaded release asset digest mismatch')
+          status['status'] = 'archive_ready'
+          request(f"{api}/repos/{repo}/releases/{release['id']}", 'PATCH', {'body': json.dumps(status, indent=2)})
+          print('Private Release archive is ready.')
+          PY

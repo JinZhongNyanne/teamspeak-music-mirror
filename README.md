@@ -178,7 +178,9 @@ Jellyfin 在网页设置中输入库地址和认证方式，再开启音源；�
 
 非 GHCR registry 登录使用 CI secrets `REGISTRY_USERNAME` 和 `REGISTRY_PASSWORD`。本地 Compose 可通过 `NODE_IMAGE` 设置构建基础镜像，通过 `TSMUSICBOT_IMAGE` 设置完整镜像地址；镜像加速源可作为基础镜像地址或 registry 使用。秘密只存储于 CI secrets 或部署端凭据存储。私有 GHCR 拉取需要具备读取包权限的认证，不能假定仓库 Contents token 同时支持镜像拉取。
 
-主分支生成 `main`、`latest` 和长 SHA 标签；版本标签如 `v1.0.0` 生成对应版本系列标签。工作流使用 GitHub 提供的 `GITHUB_TOKEN`，不用在仓库放个人令牌。首次发布后检查 GHCR package 可见性，并设置 Public 才能匿名拉取；公开仓库本身不代表包已公开。正式部署固定版本或 digest。
+主分支生成 `main`、`latest` 和长 SHA 标签；版本标签如 `v1.0.0` 生成对应版本系列标签。工作流使用 GitHub 提供的 `GITHUB_TOKEN`，不用在仓库放个人令牌。私有部署保持 GHCR package 为 Private，拉取需另行具备 Packages 权限；不要为绕过拉取问题改为 Public。公开仓库本身不代表包已公开。正式部署固定版本或 digest。
+
+私有仓库默认还会独立交付带完整 commit 标签和 SHA256 的 GitHub Release Docker archive，在 GHCR 拉取不可用时可加载到 NAS。仓库变量 `DOCKER_RELEASE_ARCHIVE=false` 可关闭，`DOCKER_ARCHIVE_PLATFORM` 默认 `linux/amd64`，支持改为 `linux/arm64`；公开仓库 fork 自动跳过此任务。详见 [私有 Release 交付](docs/DEPLOYMENT.md#私有-release-交付无需-ghcr-拉取权限)。
 
 ## TrueNAS SCALE 25.04 自定义应用
 

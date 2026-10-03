@@ -6,13 +6,36 @@
 
 GitHub Actions 工作流位于 [docker-publish.yml](../.github/workflows/docker-publish.yml)。默认主分支更新和版本 tag 推送触发构建，也可手动触发。镜像发布到 `ghcr.io/<owner>/<repository>`，所有者使用小写名称。主分支镜像使用 `:main`，发布 tag 按工作流生成版本标签；正式部署建议固定版本或 digest。
 
-在 GitHub 仓库中启用 Actions，并允许工作流发布 Packages。工作流使用仓库的 `GITHUB_TOKEN`，不需要将个人令牌提交到仓库。首次发布后检查 GHCR 包的可见性；公开仓库不代表包必然已经公开。公开部署建议把包设置为 Public，使 Docker 和 TrueNAS 可匿名拉取。
+在 GitHub 仓库中启用 Actions，并允许工作流发布 Packages。工作流使用仓库的 `GITHUB_TOKEN`，不需要将个人令牌提交到仓库。私有部署保持 GHCR 包为 Private，拉取需要单独的 Packages 权限；不要为绕过拉取问题改为 Public。公开仓库不代表包必然已经公开。
 
 本地构建：
 
 ```bash
 docker build -f scripts/docker/Dockerfile -t teamspeak-music-mirror:local .
 ```
+
+## 私有 Release 交付（无需 GHCR 拉取权限）
+
+私有仓库非 PR 的 CI 在普通多平台 registry 发布之外，默认独立生成 `linux/amd64` Docker archive，并交付到当前私有仓库的 GitHub Release。此任务只使用 CI 的 `GITHUB_TOKEN` Contents 权限，不依赖 Packages 登录；执行前与上传前均确认仓库为 private。Release 保持预发布状态，不更新 Latest。公开仓库 fork 跳过此任务，不影响普通 registry 发布。仓库变量 `DOCKER_RELEASE_ARCHIVE` 默认为 `true`，设为 `false` 可关闭；`DOCKER_ARCHIVE_PLATFORM` 默认为 `linux/amd64`，也可设为 `linux/arm64`。
+
+Release tag 为 `image-<完整commit SHA>-<run attempt>`，包含：
+
+- `teamspeak-music-mirror-image.tar.gz`：可由 Docker load 导入的镜像。
+- `SHA256SUMS`：压缩包 SHA256。
+- `image-manifest.json`：镜像完整引用、源码 commit、构建平台、文件名和 SHA256。
+
+Release 正文为 JSON，只有 `status=archive_ready` 才表示所有资产已上传并校验；`archive_pending` 不可用于部署。此状态只证明 archive 交付完成，GHCR 发布结果仍独立。镜像标签采用 `sha-<完整commit SHA>`，便于锁定版本。
+
+部署端可用已有私有仓库 Contents 读取权限请求 `GET /repos/<owner>/<repository>/releases/tags/<tag>`，核对正文 revision、platform 和状态；再用返回的资产 ID 请求 `GET /repos/<owner>/<repository>/releases/assets/<asset_id>`，使用 `Accept: application/octet-stream` 下载。资产下载可能跳转至签名对象存储 URL；仅 GitHub API 请求携带令牌，跳转下载不转发 Authorization。令牌只从受保护进程配置读取，临时签名 URL 不保存到公开资料。
+
+将三个文件保存在同一受保护目录，核对 manifest 中的 revision 是准备部署的完整 commit，并验证哈希后加载：
+
+```bash
+sha256sum -c SHA256SUMS
+docker load -i teamspeak-music-mirror-image.tar.gz
+```
+
+将应用 image 设置为 manifest 中的 `image`，选择使用本机已加载镜像（不要强制 always pull）。archive 平台必须与主机匹配，默认仅适用于 amd64 主机；arm64 可调整 archive 平台或使用 registry 多平台镜像。先在新应用的独立数据副本和隔离机器人身份上验证健康、功能和持久化，再按下文步骤切换；Release 交付不会自动操作 NAS 或停止旧应用。
 
 ## Docker Compose
 
