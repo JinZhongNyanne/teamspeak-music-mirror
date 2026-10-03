@@ -953,7 +953,33 @@ A：本项目内置 `/login` 限流（每 IP 每分钟 5 次），但生产部�
 
 > 完整历史请查看 [git log](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/commits/main) 或 [Releases](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/releases)。这里只列出重要变更和面向用户的破坏性改动。
 
-### 最新版本 — v1.14.0：歌单链接直接播放 / 每人绑定自己的网易云私人FM / B站分P
+### 最新版本 — v1.15.0：歌手页面 / REST API / TS6 Profile 与 B站续播修复
+
+**歌手搜索与页面（[PR #175](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/175)，感谢 [@zzstar101](https://github.com/zzstar101)）**
+
+- 网易云 / QQ 音乐支持搜索歌手、查看歌手介绍、热门歌曲和专辑，并播放或随机播放歌手曲目（最多 500 首）。搜索历史按音源保存在当前浏览器。
+- 歌手播放与单曲播放共用播放锁，避免同时点播时实际歌曲与队列不一致。QQ 曲目目录在上游查询失败时不缓存降级结果，不再因 50 张专辑的限制提前截断歌曲。
+- 歌手页面的迟到请求不会覆盖新页面；访客的随机播放按钮同时遵守歌手播放与模式切换权限。
+
+**REST API（[PR #173](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/173)，感谢 [@senlinjun](https://github.com/senlinjun)）**
+
+- 在设置页创建、查看和撤销 API Key；脚本可用 Bearer 或 X-API-Key 调用已有 REST 端点，权限和可控机器人范围继承所属用户。完整说明见 [REST API 文档](docs/API.md)。
+- 修复管理员撤销他人 Key 时的审计对象。修改或重置密码会撤销该用户的全部 API Key，外部集成需要重新生成凭据。
+
+**TS6 Profile（[PR #174](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/174)，感谢 [@razaxq](https://github.com/razaxq)）**
+
+- 昵称和 Away 状态通过真实音乐客户端更新，描述通过明确的客户端 ID 更新，避免修改 HTTP ServerQuery 客户端。
+- 频道描述写入和移动后的清理使用相同权限路径；重连后丢弃旧会话请求，权限不足时可靠降级。
+
+**B站长视频续播（[#161](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/issues/161)，[PR #170](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot/pull/170)）**
+
+- 优先使用稳定 CDN 镜像；流提前结束时重新解析地址并从当前进度续播，连续无进展重试有次数限制。
+- 播放结束和恢复请求按播放会话校验，旧请求不会跳过新曲，也不会覆盖同一曲目的新一轮播放。
+- 恢复地址查询期间暂停会保留暂停状态；恢复播放不会重复发起查询，查询失败后仍可按重试上限继续恢复。
+
+数据库自动新增 API Key 表，保留已有用户和设置。自动化测试只收集源码，排除旧的编译测试副本。
+
+### v1.14.0：歌单链接直接播放 / 每人绑定自己的网易云私人FM / B站分P
 
 处理了 5 个社区反馈的 issue。**没有配置变化，升级无需任何操作**；数据库会自动新增一张表（存放用户自己绑定的网易云账号），原有数据不受影响。
 
