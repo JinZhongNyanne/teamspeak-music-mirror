@@ -167,7 +167,12 @@ export class TS6HttpQuery {
 
   /** List clients on a virtual server */
   async clientList(sid = 1): Promise<HttpQueryResult> {
-    return this.request("GET", `/1/clientlist?sid=${sid}`);
+    const path = `/1/clientlist?sid=${sid}`;
+    const result = await this.request("GET", path);
+    if (result.status < 200 || result.status >= 300) {
+      throw new HttpQueryError(path, result.status, result.body);
+    }
+    return result;
   }
 
   /** List channels on a virtual server */

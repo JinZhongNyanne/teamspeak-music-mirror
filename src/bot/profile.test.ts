@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { Client, generateIdentity } from "@honeybbq/teamspeak-client";
 import { BotProfileManager } from "./profile.js";
+import { TS6HttpQuery } from "../ts-protocol/http-query.js";
 import type { TS3Client } from "../ts-protocol/client.js";
 import type { QueuedSong } from "../audio/queue.js";
 
@@ -14,6 +16,9 @@ function makeMockTs(): TS3Client & {
     get clearCalls() { return clears; },
     getHost: () => "127.0.0.1",
     getHttpQuery: () => null,
+    getClientId: () => 17,
+    getChannelId: () => 5n,
+    execCommand: vi.fn().mockResolvedValue(undefined),
     fileTransferInitUpload: vi.fn().mockResolvedValue({}),
     uploadFileData: vi.fn().mockImplementation(async (_h: any, _i: any, stream: any) => {
       const chunks: Buffer[] = [];
@@ -213,7 +218,7 @@ describe("BotProfileManager channel description follows the bot (#159)", () => {
     ts.cid = 5n;
     (ts as any).getChannelId = () => ts.cid;
     channelEdits = () =>
-      (ts.sendCommandNoWait as any).mock.calls
+      (ts.execCommand as any).mock.calls
         .map((c: any[]) => c[0] as string)
         .filter((cmd: string) => cmd.startsWith("channeledit"));
   });
@@ -262,5 +267,176 @@ describe("BotProfileManager channel description follows the bot (#159)", () => {
     await pm.onSongChange(fakeSong);
     await pm.onChannelMoved(5n);
     expect(channelEdits()).toHaveLength(1);
+  });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+function makeHttpProfile(partial: Partial<typeof cfgOff> = {}) {
+  const ts = makeMockTs() as any;
+  const state = { clid: 17, cid: 5n };
+  const descriptions = new Map<number, string>();
+  const http = new TS6HttpQuery({ host: "127.0.0.1", port: 10080 });
+  const request = vi.spyOn(http, "request").mockImplementation(async (_method, path, body) => {
+    if (path.includes("clientlist")) {
+      return { status: 200, body: { body: [{ clid: String(state.clid), cid: String(state.cid) }], status: { code: 0, message: "ok" } } };
+    }
+    if (path.includes("channeledit")) descriptions.set(Number(body!.cid), String(body!.channel_description));
+    return { status: 200, body: { status: { code: 0, message: "ok" } } };
+  });
+  ts.getHttpQuery = () => http;
+  ts.getClientId = () => state.clid;
+  ts.getChannelId = () => state.cid;
+  const logger: any = { child: () => logger, info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const pm = new BotProfileManager(ts, logger, { ...cfgOff, ...partial }, "Bot");
+  return { pm, ts, state, http, request, descriptions, logger };
+}
+
+describe("BotProfileManager checked TS6 profile lifecycle", () => {
+  it("clears the old channel through HTTP Query when moved, even without full-client edit permission", async () => {
+    const { pm, ts, state, descriptions } = makeHttpProfile({ channelDescEnabled: true });
+    ts.execCommand.mockRejectedValue(new Error("insufficient client permissions"));
+    await pm.onSongChange(fakeSong);
+    expect(descriptions.get(5)).toContain("X - Y");
+    state.cid = 9n;
+    await pm.onChannelMoved(9n);
+    expect(descriptions.get(5)).toBe("");
+    expect(descriptions.get(9)).toContain("X - Y");
+    expect(ts.sendCommandNoWait).not.toHaveBeenCalled();
+    expect(ts.execCommand).not.toHaveBeenCalled();
+  });
+
+  it("discards an old client-list reply after reconnect", async () => {
+    const { pm, state, request } = makeHttpProfile({ channelDescEnabled: true });
+    state.cid = 0n;
+    const lookup = deferred<any>();
+    request.mockImplementationOnce(() => lookup.promise);
+    const update = pm.onSongChange(fakeSong);
+    await flush();
+    state.clid = 21;
+    state.cid = 9n;
+    pm.onConnect();
+    lookup.resolve({ status: 200, body: { body: [{ clid: "17", cid: "5" }], status: { code: 0, message: "ok" } } });
+    await update;
+    expect(request.mock.calls.filter((call) => call[1].includes("channeledit"))).toEqual([]);
+    await pm.onSongChange(null);
+    expect(request).toHaveBeenLastCalledWith("POST", "/1/channeledit?sid=1", { cid: 9, channel_description: "" });
+  });
+
+  it("does not restore the previous remembered channel when a write completes after reconnect", async () => {
+    const { pm, state, request } = makeHttpProfile({ channelDescEnabled: true });
+    const write = deferred<any>();
+    request.mockImplementationOnce(() => write.promise);
+    const update = pm.onSongChange(fakeSong);
+    await flush();
+    state.clid = 21;
+    state.cid = 9n;
+    pm.onConnect();
+    write.resolve({ status: 200, body: { status: { code: 0, message: "ok" } } });
+    await update;
+    await pm.onSongChange(null);
+    expect(request).toHaveBeenLastCalledWith("POST", "/1/channeledit?sid=1", { cid: 9, channel_description: "" });
+  });
+
+  it("discards a pending channel lookup when playback stops", async () => {
+    const { pm, ts, request, descriptions } = makeHttpProfile({ channelDescEnabled: true });
+    ts.getChannelId = () => 0n;
+    const lookup = deferred<any>();
+    request.mockImplementationOnce(() => lookup.promise);
+    const update = pm.onSongChange(fakeSong);
+    await flush();
+    await pm.onSongChange(null);
+    lookup.resolve({ status: 200, body: { body: [{ clid: "17", cid: "5" }], status: { code: 0, message: "ok" } } });
+    await update;
+    expect(descriptions.get(5)).toBe("");
+  });
+
+  it("discards a pending channel lookup when the bot is moved", async () => {
+    const { pm, ts, request, descriptions } = makeHttpProfile({ channelDescEnabled: true });
+    ts.getChannelId = () => 0n;
+    const lookup = deferred<any>();
+    request.mockImplementationOnce(() => lookup.promise);
+    const update = pm.onSongChange(fakeSong);
+    await flush();
+    await pm.onChannelMoved(9n);
+    lookup.resolve({ status: 200, body: { body: [{ clid: "17", cid: "5" }], status: { code: 0, message: "ok" } } });
+    await update;
+    expect(descriptions.has(5)).toBe(false);
+    expect(descriptions.get(9)).toContain("X - Y");
+  });
+
+  it("does not disable the new connection after an old write returns a permission failure", async () => {
+    const { pm, state, request } = makeHttpProfile({ channelDescEnabled: true });
+    const write = deferred<any>();
+    request.mockImplementationOnce(() => write.promise);
+    const update = pm.onSongChange(fakeSong);
+    await flush();
+    state.clid = 21;
+    state.cid = 9n;
+    pm.onConnect();
+    write.resolve({ status: 403, body: { status: { code: 2568, message: "insufficient client permissions" } } });
+    await update;
+    await pm.onSongChange(fakeSong);
+    expect(request).toHaveBeenLastCalledWith("POST", "/1/channeledit?sid=1", { cid: 9, channel_description: "♪ 正在播放: X - Y\n专辑: Z\n平台: netease" });
+  });
+
+  it("resolves an unknown channel and sends raw newlines with one targeted description update", async () => {
+    const { pm, ts, state, request } = makeHttpProfile({ channelDescEnabled: true, descriptionEnabled: true });
+    ts.getChannelId = () => 0n;
+    state.cid = 5n;
+    await pm.onSongChange(fakeSong);
+    expect(request.mock.calls.filter((call) => call[1].includes("clientedit"))).toEqual([
+      ["POST", "/1/clientedit?sid=1", { clid: 17, client_description: "X - Y [Z]" }],
+    ]);
+    expect(request).toHaveBeenLastCalledWith("POST", "/1/channeledit?sid=1", { cid: 5, channel_description: "♪ 正在播放: X - Y\n专辑: Z\n平台: netease" });
+    expect(ts.execCommand).not.toHaveBeenCalled();
+  });
+
+  it("does not resolve or write a disconnected client", async () => {
+    const { pm, state, request } = makeHttpProfile({ channelDescEnabled: true, descriptionEnabled: true });
+    state.clid = 0;
+    state.cid = 0n;
+    await pm.onSongChange(fakeSong);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("reports HTTP lookup permission errors once and retries after reconnect", async () => {
+    const { pm, ts, request } = makeHttpProfile({ channelDescEnabled: true });
+    ts.getChannelId = () => 0n;
+    request.mockResolvedValue({ status: 403, body: { status: { code: 2568, message: "insufficient client permissions" } } });
+    await pm.onSongChange(fakeSong);
+    await pm.onSongChange(fakeSong);
+    expect(request).toHaveBeenCalledTimes(1);
+    pm.onConnect();
+    await pm.onSongChange(fakeSong);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("checks self clientupdate permission responses and retries only after reconnect", async () => {
+    const { pm, ts, request, logger } = makeHttpProfile({ nicknameEnabled: true, awayStatusEnabled: true });
+    const client: any = new Client(generateIdentity(0), "127.0.0.1:9987", "Bot");
+    const commands: string[] = [];
+    client.handler.sendPacket = vi.fn((_type, data: Buffer) => {
+      const command = data.toString();
+      commands.push(command);
+      const returnCode = command.match(/return_code=(\d+)/)?.[1];
+      client.handler.onPacket({ typeFlagged: 2, data: Buffer.from(`error id=2568 msg=insufficient\\sclient\\spermissions${returnCode ? ` return_code=${returnCode}` : ""}`) });
+    });
+    ts.sendCommandNoWait.mockImplementation((command: string) => client.sendCommandNoWait(command));
+    ts.execCommand.mockImplementation((command: string) => client.execCommand(command));
+    await pm.onSongChange(null);
+    await pm.onSongChange(null);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatch(/^clientupdate client_nickname=Bot client_away=1 client_away_message=等待播放 return_code=\d+$/);
+    expect(request).not.toHaveBeenCalled();
+    expect(logger.info.mock.calls.some((call: any[]) => call[1] === "Client properties updated (nickname + away)")).toBe(false);
+    pm.onConnect();
+    await pm.onSongChange(null);
+    expect(commands).toHaveLength(2);
   });
 });

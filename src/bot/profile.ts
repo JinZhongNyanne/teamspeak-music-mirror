@@ -13,6 +13,13 @@ const AVATAR_MAX_BYTES = 200 * 1024;
 /** Timeout for file-transfer operations (upload / delete). */
 const FILE_TRANSFER_TIMEOUT_MS = 6000;
 
+interface ProfileUpdateContext {
+  generation: number;
+  channelGeneration: number;
+  clientId: number;
+  httpQuery: ReturnType<TS3Client["getHttpQuery"]>;
+}
+
 /**
  * Manages the bot's TeamSpeak presence (avatar, description, nickname,
  * away status, channel description, now-playing messages).
@@ -57,6 +64,8 @@ export class BotProfileManager {
    * the generation changed, a newer update has superseded them.
    */
   private generation = 0;
+  /** Channel moves supersede channel writes without cancelling avatar work. */
+  private channelGeneration = 0;
 
   constructor(
     tsClient: TS3Client,
@@ -119,20 +128,25 @@ export class BotProfileManager {
    */
   async onSongChange(song: QueuedSong | null): Promise<void> {
     const gen = ++this.generation;
+    this.channelGeneration++;
     this.currentSong = song;
+    const context = this.createUpdateContext();
 
     // 1. Avatar first — file transfer uses its own response tracker and
     //    must run before sendCommandNoWait calls whose orphaned responses
     //    could confuse the command matcher.
     await this.updateAvatar(song?.coverUrl ?? null, gen);
-    if (this.generation !== gen) return; // superseded
+    if (!this.isCurrentUpdate(context)) return;
 
-    // 2. Combined clientupdate (nickname + away in one fire-and-forget)
-    await this.updateClientProperties(song);
+    // 2. Checked clientupdate sent by the visible client itself.
+    await this.updateClientProperties(song, context);
+    if (!this.isCurrentUpdate(context)) return;
     // 3. Description (clientedit on TS3, httpQuery on TS6)
-    await this.updateDescription(song);
-    // 4. Channel description (fire-and-forget channeledit)
-    await this.updateChannelDescription(song);
+    await this.updateDescription(song, context);
+    if (!this.isCurrentUpdate(context)) return;
+    // 4. Checked channel description update.
+    await this.updateChannelDescription(song, context);
+    if (!this.isCurrentUpdate(context)) return;
     // 5. Now-playing chat message
     if (song) await this.sendNowPlayingMessage(song);
   }
@@ -140,6 +154,7 @@ export class BotProfileManager {
   /** Reset permission-denied flags and bump generation on new connection. */
   onConnect(): void {
     this.generation++;
+    this.channelGeneration++;
     this.currentSong = null;
     // Channel ids are per-server; never carry one across a (re)connect.
     this.channelDescCid = null;
@@ -168,19 +183,20 @@ export class BotProfileManager {
     if (!this.config.channelDescEnabled || this.permDenied.channelDesc) return;
     const oldChannelId = this.channelDescCid;
     if (oldChannelId === newChannelId) return;
+    this.channelGeneration++;
+    const context = this.createUpdateContext();
+    const song = this.currentSong;
     try {
       if (oldChannelId !== null) {
-        await this.tsClient.sendCommandNoWait(
-          `channeledit cid=${oldChannelId} channel_description=`,
-        );
+        if (!await this.writeChannelDescription(oldChannelId, "", context)) return;
         this.channelDescCid = null;
       }
     } catch (err) {
-      this.handleFeatureError("channelDesc", err);
+      if (this.isCurrentChannelUpdate(context)) this.handleFeatureError("channelDesc", err);
       return;
     }
-    if (this.currentSong) {
-      await this.updateChannelDescription(this.currentSong, newChannelId);
+    if (song) {
+      await this.updateChannelDescription(song, context, newChannelId);
     }
   }
 
@@ -286,18 +302,19 @@ export class BotProfileManager {
     }
   }
 
-  private async updateDescription(song: QueuedSong | null): Promise<void> {
+  private async updateDescription(song: QueuedSong | null, context: ProfileUpdateContext): Promise<void> {
     if (!this.config.descriptionEnabled || this.permDenied.description) return;
+    if (!this.isCurrentUpdate(context)) return;
 
     try {
       const text = song
         ? `${song.name} - ${song.artist} [${song.album}]`
         : "";
 
-      const clid = this.tsClient.getClientId();
+      const clid = context.clientId;
       if (clid <= 0) return;
 
-      const httpQuery = this.tsClient.getHttpQuery();
+      const httpQuery = context.httpQuery;
 
       if (httpQuery) {
         // IMPORTANT:
@@ -306,6 +323,7 @@ export class BotProfileManager {
         const result = await httpQuery.clientEdit(clid, {
           client_description: text,
         });
+        if (!this.isCurrentUpdate(context)) return;
 
         this.logger.info(
           { status: result.status, clid },
@@ -318,27 +336,22 @@ export class BotProfileManager {
           ),
           5000,
         );
+        if (!this.isCurrentUpdate(context)) return;
 
         this.logger.info({ clid }, "Description updated");
       }
     } catch (err) {
-      this.handleFeatureError("description", err);
+      if (this.isCurrentUpdate(context)) this.handleFeatureError("description", err);
     }
   }
 
   /**
    * Build and send a single `clientupdate` command that sets nickname
-   * and away status together, avoiding multiple round-trips that can
-   * cause command-queue timeouts on the TS3 protocol.
-   *
-   * Values are collected as raw strings/numbers. The TS6 HTTP path
-   * forwards them as JSON (the server expects real spaces, not `\s`);
-   * the TS3 wire path escapes them on the fly. Previously the code
-   * escaped upfront and then split the escaped string to build the
-   * JSON body, so TS6 received literal backslashes and silently
-   * rejected the update.
+   * and away status together. The full client sends this command on both
+   * TS3 and TS6, with a return code so permission failures are observable.
    */
-  private async updateClientProperties(song: QueuedSong | null): Promise<void> {
+  private async updateClientProperties(song: QueuedSong | null, context: ProfileUpdateContext): Promise<void> {
+    if (!this.isCurrentUpdate(context) || context.clientId <= 0) return;
     const rawProps: Record<string, string | number> = {};
 
     // --- Nickname ---
@@ -374,20 +387,23 @@ export class BotProfileManager {
           : `${key}=${value}`,
       );
 
-      await this.tsClient.sendCommandNoWait(
-        `clientupdate ${parts.join(" ")}`,
+      await this.withTimeout(
+        this.tsClient.execCommand(`clientupdate ${parts.join(" ")}`),
+        5000,
       );
+      if (!this.isCurrentUpdate(context)) return;
 
       this.logger.info(
         {
-          clid: this.tsClient.getClientId(),
+          clid: context.clientId,
           props: Object.keys(rawProps),
         },
         "Client properties updated (nickname + away)",
       );
     } catch (err) {
-      this.handleFeatureError("nickname", err);
-      this.handleFeatureError("awayStatus", err);
+      if (!this.isCurrentUpdate(context)) return;
+      if (rawProps.client_nickname !== undefined) this.handleFeatureError("nickname", err);
+      if (rawProps.client_away !== undefined) this.handleFeatureError("awayStatus", err);
     }
   }
 
@@ -438,28 +454,35 @@ export class BotProfileManager {
 
   private async updateChannelDescription(
     song: QueuedSong | null,
+    context: ProfileUpdateContext,
     targetChannelId?: bigint,
   ): Promise<void> {
     if (!this.config.channelDescEnabled || this.permDenied.channelDesc) return;
+    if (!this.isCurrentChannelUpdate(context) || context.clientId <= 0) return;
 
     try {
-      let channelId = targetChannelId ?? this.tsClient.getChannelId();
+      // A stop already knows which channel to clear if a write succeeded.
+      // Avoid a needless client-list lookup that could prevent that cleanup.
+      let channelId = !song && this.channelDescCid !== null
+        ? this.channelDescCid
+        : targetChannelId ?? this.tsClient.getChannelId();
 
       // TS6 full-client may report channelID() as 0 even after the
       // visible music client has already joined a channel.
       // Fall back to HTTP Query and resolve our real clid -> cid.
       if (channelId === 0n) {
-        const httpQuery = this.tsClient.getHttpQuery();
-        const clid = this.tsClient.getClientId();
+        const httpQuery = context.httpQuery;
+        const clid = context.clientId;
 
         if (httpQuery && clid > 0) {
           const result = await httpQuery.clientList();
+          if (!this.isCurrentChannelUpdate(context)) return;
 
           const payload = result.body as {
             body?: Array<Record<string, string>>;
           };
 
-          const me = payload.body?.find(
+          const me = payload?.body?.find(
             (client) => Number(client.clid) === clid,
           );
 
@@ -478,43 +501,12 @@ export class BotProfileManager {
       }
 
       if (!song) {
-        const target = this.channelDescCid ?? channelId;
-
-        if (target === 0n) return;
-
-        const httpQuery = this.tsClient.getHttpQuery();
-
-        if (httpQuery) {
-          const result = await httpQuery.channelEdit(Number(target), {
-            channel_description: "",
-          });
-
-          this.logger.info(
-            {
-              status: result.status,
-              cid: target.toString(),
-            },
-            "Channel description cleared",
-          );
-        } else {
-          await this.withTimeout(
-            this.tsClient.execCommand(
-              `channeledit cid=${target} channel_description=`,
-            ),
-            5000,
-          );
-
-          this.logger.info(
-            { cid: target.toString() },
-            "Channel description cleared",
-          );
-        }
-
-        this.channelDescCid = null;
+        if (channelId <= 0n) return;
+        if (await this.writeChannelDescription(channelId, "", context)) this.channelDescCid = null;
         return;
       }
 
-      if (channelId === 0n) return;
+      if (channelId <= 0n) return;
 
       const lines = [
         `♪ 正在播放: ${song.name} - ${song.artist}`,
@@ -525,38 +517,39 @@ export class BotProfileManager {
       // HTTP Query uses a normal JSON string, so use real newlines here.
       const desc = lines.join("\n");
 
-      const httpQuery = this.tsClient.getHttpQuery();
-
-      if (httpQuery) {
-        const result = await httpQuery.channelEdit(Number(channelId), {
-          channel_description: desc,
-        });
-
-        this.logger.info(
-          {
-            status: result.status,
-            cid: channelId.toString(),
-          },
-          "Channel description updated",
-        );
-      } else {
-        await this.withTimeout(
-          this.tsClient.execCommand(
-            `channeledit cid=${channelId} channel_description=${escapeTS3(desc)}`,
-          ),
-          5000,
-        );
-
-        this.logger.info(
-          { cid: channelId.toString() },
-          "Channel description updated",
-        );
-      }
-
-      this.channelDescCid = channelId;
+      if (await this.writeChannelDescription(channelId, desc, context)) this.channelDescCid = channelId;
     } catch (err) {
-      this.handleFeatureError("channelDesc", err);
+      if (this.isCurrentChannelUpdate(context)) this.handleFeatureError("channelDesc", err);
     }
+  }
+
+  /** Both move cleanup and ordinary writes use the same checked transport. */
+  private async writeChannelDescription(
+    channelId: bigint,
+    description: string,
+    context: ProfileUpdateContext,
+  ): Promise<boolean> {
+    if (!this.isCurrentChannelUpdate(context)) return false;
+    let status: number | undefined;
+    if (context.httpQuery) {
+      const result = await context.httpQuery.channelEdit(Number(channelId), {
+        channel_description: description,
+      });
+      status = result.status;
+    } else {
+      await this.withTimeout(
+        this.tsClient.execCommand(
+          `channeledit cid=${channelId} channel_description=${escapeTS3(description)}`,
+        ),
+        5000,
+      );
+    }
+    if (!this.isCurrentChannelUpdate(context)) return false;
+    this.logger.info(
+      { status, cid: channelId.toString() },
+      description ? "Channel description updated" : "Channel description cleared",
+    );
+    return true;
   }
 
   private async sendNowPlayingMessage(song: QueuedSong): Promise<void> {
@@ -570,6 +563,25 @@ export class BotProfileManager {
   }
 
   // --- Helpers ---
+
+  private createUpdateContext(): ProfileUpdateContext {
+    return {
+      generation: this.generation,
+      channelGeneration: this.channelGeneration,
+      clientId: this.tsClient.getClientId(),
+      httpQuery: this.tsClient.getHttpQuery(),
+    };
+  }
+
+  private isCurrentUpdate(context: ProfileUpdateContext): boolean {
+    return context.generation === this.generation &&
+      context.clientId === this.tsClient.getClientId() &&
+      context.httpQuery === this.tsClient.getHttpQuery();
+  }
+
+  private isCurrentChannelUpdate(context: ProfileUpdateContext): boolean {
+    return this.isCurrentUpdate(context) && context.channelGeneration === this.channelGeneration;
+  }
 
   /**
    * Append CDN resize parameters to get a thumbnail suitable for TS3 avatars.
