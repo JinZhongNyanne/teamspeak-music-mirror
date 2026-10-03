@@ -178,7 +178,7 @@ describe("LocalMusicProvider upload validation", () => {
       expect(song.platform).toBe("local");
       expect(song.name).toBe("clip");
     }
-  });
+  }, 30_000); // Several real FFmpeg probes can take longer on ARM builders.
 
   it("refuses a .m4v raw video elementary stream, which by definition has no audio", async () => {
     // .m4v is not a container — ffmpeg's rawvideo demuxer opens arbitrary

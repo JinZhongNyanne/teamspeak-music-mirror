@@ -33,6 +33,9 @@ export class BotProfileManager {
   private config: ProfileConfig;
   private defaultNickname: string;
   private customAvatar: Buffer | null = null;
+  private appliedAvatar: Buffer | null | undefined;
+  private avatarListeners = new Set<(avatar: Buffer | null) => void>();
+  private avatarQueue: Promise<void> = Promise.resolve();
   /**
    * Tracks the last song handed to onSongChange. null means stopped/idle.
    * Used by setCustomAvatar to decide whether the new buffer should be
@@ -155,6 +158,8 @@ export class BotProfileManager {
   onConnect(): void {
     this.generation++;
     this.channelGeneration++;
+    // A stalled transfer belongs to the previous connection.
+    this.avatarQueue = Promise.resolve();
     this.currentSong = null;
     // Channel ids are per-server; never carry one across a (re)connect.
     this.channelDescCid = null;
@@ -208,6 +213,65 @@ export class BotProfileManager {
     Object.assign(this.config, partial);
   }
 
+  /** Latest successfully committed avatar; undefined means not yet known. */
+  getAppliedAvatar(): Buffer | null | undefined {
+    return this.appliedAvatar == null ? this.appliedAvatar : Buffer.from(this.appliedAvatar);
+  }
+
+  subscribeAvatar(listener: (avatar: Buffer | null) => void): () => void {
+    this.avatarListeners.add(listener);
+    return () => { this.avatarListeners.delete(listener); };
+  }
+
+  /** Copies actual source bytes, independent of playback cover preferences. */
+  mirrorAvatar(avatar: Buffer | null, isBound: () => boolean = () => true): Promise<void> {
+    return this.commitAvatar(avatar, ++this.generation, isBound);
+  }
+
+  /** Serialize file writes and invalidate late completions after a timeout. */
+  private commitAvatar(avatar: Buffer | null, gen: number, isBound: () => boolean = () => true): Promise<void> {
+    const bytes = avatar && avatar.length > 0 ? Buffer.from(avatar) : null;
+    let settled: Promise<void> = Promise.resolve();
+    const run = async () => {
+      let active = true;
+      const current = () => active && this.generation === gen && isBound();
+      if (!current() || this.permDenied.avatar) return;
+      try {
+        settled = (async () => {
+          if (bytes) {
+            await this.doAvatarUpload(bytes, current);
+          } else {
+            try {
+              await this.withTimeout(this.tsClient.fileTransferDeleteFile(0n, ["/avatar"]), FILE_TRANSFER_TIMEOUT_MS);
+            } catch (err) {
+              // Missing files are harmless; permissions must still disable retries.
+              const message = String(err).toLowerCase();
+              if (message.includes("permission") || message.includes("insufficient")) throw err;
+            }
+            if (!current()) return;
+            await this.tsClient.execCommand("clientupdate client_flag_avatar=");
+          }
+          if (!current()) return;
+          this.appliedAvatar = bytes;
+          for (const listener of this.avatarListeners) {
+            try { listener(bytes ? Buffer.from(bytes) : null); }
+            catch (err) { this.logger.warn({ err }, "Avatar subscriber failed"); }
+          }
+        })();
+        await this.withTimeout(settled, FILE_TRANSFER_TIMEOUT_MS);
+      } catch (err) {
+        if (current()) this.handleFeatureError("avatar", err);
+      } finally {
+        active = false;
+      }
+    };
+    const result = this.avatarQueue.then(run);
+    // A timeout cannot cancel TCP writes. Keep later writes behind the real
+    // transfer completion so stale bytes cannot overwrite the latest avatar.
+    this.avatarQueue = result.then(() => settled.catch(() => {}), () => {});
+    return result;
+  }
+
   // --- Internal update methods ---
 
   private async updateAvatar(coverUrl: string | null, gen: number): Promise<void> {
@@ -236,7 +300,7 @@ export class BotProfileManager {
       // Wrap the file-transfer sequence with a timeout — the TS3
       // full-client file transfer can silently hang.
       const start = Date.now();
-      await this.withTimeout(this.doAvatarUpload(imageBuffer), FILE_TRANSFER_TIMEOUT_MS);
+      await this.commitAvatar(imageBuffer, gen);
       this.logger.info(
         { bytes: imageBuffer.length, elapsedMs: Date.now() - start },
         "Avatar updated",
@@ -256,17 +320,19 @@ export class BotProfileManager {
    * clients showing a placeholder. The flag is now only set after the TCP
    * transfer resolves.
    */
-  private async doAvatarUpload(imageBuffer: Buffer): Promise<void> {
+  private async doAvatarUpload(imageBuffer: Buffer, current: () => boolean): Promise<void> {
     const host = this.tsClient.getHost();
     this.logger.debug({ bytes: imageBuffer.length, host }, "Avatar: init file transfer");
     const info = await this.tsClient.fileTransferInitUpload(
       0n, "/avatar", "", BigInt(imageBuffer.length), true,
     );
+    if (!current()) return;
     this.logger.debug({ bytes: imageBuffer.length }, "Avatar: uploading file data");
     await this.tsClient.uploadFileData(host, info, Readable.from(imageBuffer));
+    if (!current()) return;
     const md5 = createHash("md5").update(imageBuffer).digest("hex");
     this.logger.debug({ md5 }, "Avatar: setting client_flag_avatar");
-    await this.tsClient.sendCommandNoWait(`clientupdate client_flag_avatar=${escapeTS3(md5)}`);
+    await this.tsClient.execCommand(`clientupdate client_flag_avatar=${escapeTS3(md5)}`);
   }
 
   private async clearAvatar(gen: number): Promise<void> {
@@ -274,32 +340,12 @@ export class BotProfileManager {
       await this.applyIdleAvatar(gen);
       return;
     }
-    try {
-      await this.withTimeout(
-        this.tsClient.fileTransferDeleteFile(0n, ["/avatar"]),
-        FILE_TRANSFER_TIMEOUT_MS,
-      );
-    } catch {
-      // File may not exist or transfer timed out — that's fine
-    }
-    if (this.generation !== gen) return;
-    try {
-      await this.tsClient.sendCommandNoWait("clientupdate client_flag_avatar=");
-    } catch (err) {
-      this.handleFeatureError("avatar", err);
-    }
+    await this.commitAvatar(null, gen);
   }
 
   private async applyIdleAvatar(gen: number): Promise<void> {
     if (!this.customAvatar || this.customAvatar.length === 0) return;
-    if (this.permDenied.avatar) return;
-    try {
-      await this.withTimeout(this.doAvatarUpload(this.customAvatar), FILE_TRANSFER_TIMEOUT_MS);
-      if (this.generation !== gen) return;
-      this.logger.info({ bytes: this.customAvatar.length }, "Idle (custom) avatar applied");
-    } catch (err) {
-      this.handleFeatureError("avatar", err);
-    }
+    await this.commitAvatar(this.customAvatar, gen);
   }
 
   private async updateDescription(song: QueuedSong | null, context: ProfileUpdateContext): Promise<void> {
@@ -618,12 +664,13 @@ export class BotProfileManager {
 
   /** Race a promise against a timeout. */
   private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
     return Promise.race([
       promise,
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms),
-      ),
-    ]);
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms);
+      }),
+    ]).finally(() => clearTimeout(timer));
   }
 
   private handleFeatureError(

@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 /data/
 *.db
@@ -11,3 +11,18 @@ cookies/
 setup.log
 /bin/
 scripts/navbar_bigger.png
+
+# Private runtime and deployment material
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+.env.*
+!.env.example
+/mirror.json
+/backups/
+/private/
+*.pem
+*.key
+*.p12
+*.pfx

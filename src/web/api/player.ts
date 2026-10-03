@@ -57,6 +57,10 @@ export function createPlayerRouter(
       res.status(404).json({ error: "Bot not found" });
       return;
     }
+    if (req.method !== "GET" && bot.isMirrorTarget?.()) {
+      res.status(409).json({ error: "This bot mirrors audio; control the source bot instead" });
+      return;
+    }
     (req as any).bot = bot;
     next();
   });
@@ -226,7 +230,7 @@ export function createPlayerRouter(
   // Get current elapsed time (ground truth from server)
   router.get("/:botId/elapsed", (req, res) => {
     const bot = (req as any).bot;
-    res.json({ elapsed: bot.getPlayer().getElapsed() });
+    res.json({ elapsed: bot.isMirrorTarget?.() ? bot.getStatus().elapsed : bot.getPlayer().getElapsed() });
   });
 
   // Seek to position

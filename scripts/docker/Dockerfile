@@ -1,67 +1,57 @@
-# ==========================================
-# TSMusicBot Docker Image
-# One-click deployment — all dependencies included
-# ==========================================
+# syntax=docker/dockerfile:1
+# Build each target architecture natively (or under QEMU), including native addons.
+FROM node:22-bookworm-slim AS builder
 
-# --- Stage 1: Build backend + frontend ---
-FROM node:22-slim AS builder
-
-# Install build tools for native modules (opus, better-sqlite3)
+ENV FFMPEG_BIN=/usr/bin/ffmpeg
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ && \
-    rm -rf /var/lib/apt/lists/*
-
+    ca-certificates ffmpeg python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-# Install backend dependencies
-COPY package*.json ./
+COPY package.json package-lock.json ./
 RUN npm ci
-
-# Install frontend dependencies
-COPY web/package*.json ./web/
-RUN cd web && npm ci
-
-# Copy source and build
+COPY web/package.json web/package-lock.json ./web/
+RUN npm ci --prefix web
 COPY . .
-RUN npm run build
+RUN npm run build \
+    && npm prune --omit=dev \
+    && npm run check:native \
+    && npm cache clean --force
 
-# Install production dependencies (with native addons compiled) in the builder
-# so we don't need build tools in the production image.
-RUN rm -rf node_modules && npm ci --production && npm cache clean --force
-
-# --- Stage 2: Production image ---
-FROM node:22-slim
-
-# Install system FFmpeg — the ffmpeg-static npm package bundles a pre-compiled
-# binary that can SIGSEGV inside Docker (incompatible glibc / missing libs).
-# System-installed FFmpeg is always compatible with the container runtime.
+FROM node:22-bookworm-slim AS downloader
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg && \
-    rm -rf /var/lib/apt/lists/*
+    ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY scripts/docker/install-yt-dlp.sh /tmp/install-yt-dlp.sh
+RUN sh /tmp/install-yt-dlp.sh "$TARGETARCH" /usr/local/bin/yt-dlp
 
+FROM node:22-bookworm-slim AS runtime
+ENV NODE_ENV=production \
+    FFMPEG_BIN=/usr/bin/ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
-# Copy built output and pre-compiled production node_modules from builder
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/web/dist ./web/dist
-COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/package.json /app/package-lock.json ./
 COPY --from=builder /app/node_modules ./node_modules
-# package.json declares a `prestart` preflight, so `npm start` inside the
-# container needs this file. The image's own CMD calls node directly and never
-# goes through npm, but an interactive `docker exec ... npm start` would
-# otherwise die on a missing script rather than starting the bot.
 COPY --from=builder /app/scripts/check-native.mjs ./scripts/check-native.mjs
-# ...and the module it imports for crash-proof logging.
 COPY --from=builder /app/scripts/lib/console-log.mjs ./scripts/lib/console-log.mjs
+COPY --from=downloader /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
+COPY --from=downloader /usr/local/share/doc/yt-dlp /usr/local/share/doc/yt-dlp
+COPY scripts/docker/yt-dlp.conf /etc/yt-dlp.conf
+COPY scripts/docker/healthcheck.mjs ./scripts/healthcheck.mjs
 
-# Data directory for database, cookies, logs
-RUN mkdir -p /app/data
+# Persistent config, database, cookies, uploads and logs; optional external media.
+RUN mkdir -p /app/data /mnt/media \
+    && node scripts/check-native.mjs \
+    && test "$(yt-dlp --version)" = "2026.08.19" \
+    && ffmpeg -version >/dev/null
 VOLUME ["/app/data"]
-
 EXPOSE 3000
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD node -e "fetch('http://localhost:3000/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"
-
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["node", "scripts/healthcheck.mjs"]
 CMD ["node", "dist/index.js"]

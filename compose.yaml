@@ -1,0 +1,29 @@
+services:
+  tsmusicbot:
+    # Set TSMUSICBOT_IMAGE to your fork's GHCR image to use a published build.
+    image: ${TSMUSICBOT_IMAGE:-teamspeak-music-mirror:local}
+    build:
+      context: .
+      dockerfile: scripts/docker/Dockerfile
+    init: true
+    restart: unless-stopped
+    ports:
+      # WEB_PORT controls the host port; keep webPort=3000 in the bot settings.
+      - "${WEB_BIND_ADDRESS:-0.0.0.0}:${WEB_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1}
+      # FFmpeg uses lowercase http_proxy; keep subprocesses consistent.
+      http_proxy: ${HTTP_PROXY:-}
+      https_proxy: ${HTTPS_PROXY:-}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,::1}
+    volumes:
+      - type: bind
+        source: ${DATA_PATH:-./data}
+        target: /app/data
+      - type: bind
+        source: ${MEDIA_PATH:-./media}
+        target: /mnt/media
+        read_only: true

@@ -18,7 +18,9 @@ function makeMockTs(): TS3Client & {
     getHttpQuery: () => null,
     getClientId: () => 17,
     getChannelId: () => 5n,
-    execCommand: vi.fn().mockResolvedValue(undefined),
+    execCommand: vi.fn().mockImplementation(async (cmd: string) => {
+      if (/client_flag_avatar=$/.test(cmd)) clears++;
+    }),
     fileTransferInitUpload: vi.fn().mockResolvedValue({}),
     uploadFileData: vi.fn().mockImplementation(async (_h: any, _i: any, stream: any) => {
       const chunks: Buffer[] = [];
@@ -438,5 +440,72 @@ describe("BotProfileManager checked TS6 profile lifecycle", () => {
     pm.onConnect();
     await pm.onSongChange(null);
     expect(commands).toHaveLength(2);
+  });
+});
+
+
+describe("applied avatar mirroring", () => {
+  it("publishes successful custom, cover and restored idle bytes, isolates subscribers", async () => {
+    const ts = makeMockTs();
+    const pm = new BotProfileManager(ts, noopLogger, cfgOn, "Bot");
+    const changes = vi.fn();
+    pm.subscribeAvatar(() => { throw new Error("output failed"); });
+    const unsubscribe = pm.subscribeAvatar(changes);
+    pm.loadCustomAvatar(Buffer.from("idle"));
+    pm.onConnect();
+    await flush();
+    vi.spyOn(pm as any, "downloadImage").mockResolvedValue(Buffer.from("cover"));
+    await pm.onSongChange(fakeSong);
+    await pm.onSongChange(null);
+    expect(changes.mock.calls.map(([bytes]) => bytes.toString())).toEqual(["idle", "cover", "idle"]);
+    expect(pm.getAppliedAvatar()?.toString()).toBe("idle");
+    const snapshot = pm.getAppliedAvatar()!;
+    snapshot[0] = 0;
+    expect(pm.getAppliedAvatar()?.toString()).toBe("idle");
+    unsubscribe();
+    await pm.mirrorAvatar(null);
+    expect(changes).toHaveBeenCalledTimes(3);
+    expect(pm.getAppliedAvatar()).toBeNull();
+  });
+
+  it("bypasses disabled covers, clears despite target custom avatar, and respects permission denials", async () => {
+    const ts = makeMockTs();
+    const pm = new BotProfileManager(ts, noopLogger, cfgOff, "Target");
+    pm.loadCustomAvatar(Buffer.from("target idle"));
+    const changes = vi.fn();
+    pm.subscribeAvatar(changes);
+    await pm.mirrorAvatar(Buffer.from("source"));
+    await pm.mirrorAvatar(null);
+    expect(ts.uploadCalls.map(bytes => bytes.toString())).toEqual(["source"]);
+    expect(ts.clearCalls).toBe(1);
+    expect((ts.execCommand as any).mock.calls.every(([cmd]: [string]) => cmd.startsWith("clientupdate client_flag_avatar="))).toBe(true);
+    (ts.execCommand as any).mockRejectedValueOnce(new Error("insufficient permissions"));
+    await pm.mirrorAvatar(Buffer.from("denied"));
+    const uploads = ts.uploadCalls.length;
+    await pm.mirrorAvatar(Buffer.from("skip"));
+    expect(ts.uploadCalls).toHaveLength(uploads);
+    expect(changes).toHaveBeenCalledTimes(2);
+    pm.onConnect();
+    await pm.mirrorAvatar(Buffer.from("retry"));
+    expect(pm.getAppliedAvatar()?.toString()).toBe("retry");
+  });
+
+  it("does not commit stale uploads or detached mirror work", async () => {
+    const ts = makeMockTs();
+    const pm = new BotProfileManager(ts, noopLogger, cfgOff, "Target");
+    let release!: () => void;
+    (ts.uploadFileData as any).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const first = pm.mirrorAvatar(Buffer.from("old"));
+    await flush();
+    const second = pm.mirrorAvatar(Buffer.from("new"));
+    release();
+    await Promise.all([first, second]);
+    expect(ts.execCommand).toHaveBeenCalledTimes(1);
+    expect(pm.getAppliedAvatar()?.toString()).toBe("new");
+    let bound = true;
+    const detached = pm.mirrorAvatar(Buffer.from("detached"), () => bound);
+    bound = false;
+    await detached;
+    expect(ts.execCommand).toHaveBeenCalledTimes(1);
   });
 });

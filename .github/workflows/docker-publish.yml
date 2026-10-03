@@ -1,57 +1,121 @@
-name: Build and Publish Docker Image
+name: Build, test and publish
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Extra tag to publish (optional, e.g. "edge")'
-        required: false
-        default: ''
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: zhangtianyao1/teamspeak-music-bot
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-and-push:
+  test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
+    timeout-minutes: 20
+    env:
+      FFMPEG_BIN: /usr/bin/ffmpeg
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install native build dependencies and FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg python3 make g++
+      - name: Install dependencies
+        run: npm ci
+      - name: Check native addons
+        run: npm run check:native
+      - name: Type check backend
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test
+      - name: Validate Compose configuration and helper syntax
+        run: |
+          docker compose -f compose.yaml config --quiet
+          docker compose --project-directory . -f scripts/docker/docker-compose.yml config --quiet
+          sh -n scripts/docker/install-yt-dlp.sh
+          node --check scripts/docker/healthcheck.mjs
 
+  # Pull requests can build both platforms, with no package write permission.
+  build-pr:
+    if: github.event_name == 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      - name: Build both architectures without publishing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scripts/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha,scope=music-mirror
+          cache-to: type=gha,scope=music-mirror,mode=max
 
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Derive lowercase GHCR image name from this repository
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract image metadata
+      - name: Extract image tags and labels
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ steps.image.outputs.name }}
           tags: |
+            type=ref,event=branch
+            type=sha,format=long
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
-
-      - name: Build and push
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      - name: Build and publish both architectures
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -60,5 +124,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=music-mirror
+          cache-to: type=gha,scope=music-mirror,mode=max

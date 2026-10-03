@@ -51,6 +51,10 @@ import {
   type ManagedVoiceClientScope,
 } from "./managed-voice-clients.js";
 
+function assertIndependentPlayback(mirrorSource: unknown): void {
+  if (mirrorSource) throw new Error("This bot mirrors audio; control the source bot instead");
+}
+
 /** Reply sent when a non-admin invokes an admin-only chat command. */
 export const COMMAND_DENIED_MESSAGE = "⛔ 需要管理员权限（该命令仅限管理员服务器组）";
 
@@ -209,6 +213,11 @@ export class BotInstance extends EventEmitter {
   /** Per-bot Jellyfin playback-report session (start / ~10s progress / stop).
    *  null when the wired provider has no reporting capability. */
   private jellyfinReporter: JellyfinPlaybackReporter | null = null;
+  private readonly mirrorChannelId?: string;
+  private readonly mirrorChannelPassword?: string;
+  private mirrorSource: (() => BotStatus | undefined) | null = null;
+  private mirrorAudience: (() => Promise<Set<number> | null>) | null = null;
+  private mirrorQueue: (() => QueuedSong[]) | null = null;
   /** Debounce handle for the live-queue snapshot writer (Feature 2, #119). */
   private snapshotTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -216,6 +225,8 @@ export class BotInstance extends EventEmitter {
     super();
     this.id = options.id;
     this.name = options.name;
+    this.mirrorChannelId = options.tsOptions.channelId;
+    this.mirrorChannelPassword = options.tsOptions.channelPassword;
     this.neteaseProvider = options.neteaseProvider;
     this.qqProvider = options.qqProvider;
     this.bilibiliProvider = options.bilibiliProvider;
@@ -330,6 +341,7 @@ export class BotInstance extends EventEmitter {
 
   private setupPlayerEvents(): void {
     this.player.on("frame", (opusFrame: Buffer) => {
+      if (this.mirrorSource) return;
       const result = this.tsClient.sendVoiceData(opusFrame);
       // A terminal fault can outlive a pause, queue change, or URL recovery.
       // Retry the actual send first so a repaired transport can clear it.
@@ -508,14 +520,25 @@ export class BotInstance extends EventEmitter {
     // client is present — i.e. exactly when a listener returns — so it cannot
     // be used to confirm the return. See _resumeIfReturning().
     this.tsClient.on("clientEnter", () => {
+      if (this.mirrorSource) this.emit("mirrorAudienceChanged", true);
       this._resumeIfReturning();
       void this.refreshOccupancy();
     });
     this.tsClient.on("clientLeave", (event: { id: number }) => {
+      if (this.mirrorSource) this.emit("mirrorAudienceChanged", false);
       this.voiceDucking.removeSpeaker(event.id);
       void this.refreshOccupancy();
     });
     this.tsClient.on("clientMoved", (event: { id: number; targetChannelID: bigint }) => {
+      if (this.mirrorSource) this.emit("mirrorAudienceChanged", event.targetChannelID === this.tsClient.getChannelId());
+      if (this.mirrorSource && event.id === this.tsClient.getClientId() &&
+          this.mirrorChannelId && event.targetChannelID !== BigInt(this.mirrorChannelId)) {
+        // Server permissions normally prevent moves; also fail closed and
+        // return to the configured room if an operator changes our channel.
+        void this.tsClient.joinChannel(this.mirrorChannelId, this.mirrorChannelPassword).catch((err) =>
+          this.logger.warn({ err }, "Mirror output could not return to its fixed channel"));
+        return;
+      }
       if (event.id === this.tsClient.getClientId()) {
         // Moving the bot invalidates every activity deadline from its old
         // channel even if no individual leave events arrive.
@@ -604,7 +627,18 @@ export class BotInstance extends EventEmitter {
       // in its own channel) — occupancy is unknown, so don't act. Acting on it
       // would mis-read it as "empty" and falsely auto-pause / idle-disconnect.
       const userCount = occupancyFromClientList(clients.length);
-      if (userCount !== null) this.handleOccupancy(userCount);
+      if (userCount === null) return;
+      if (!this.mirrorAudience) {
+        this.handleOccupancy(userCount);
+        return;
+      }
+      const audience = this.listenerIds(clients);
+      if (audience === null) return;
+      const mirrorAudience = await this.mirrorAudience();
+      if (mirrorAudience === null || !this.connected || this.lifecycleGeneration !== generation ||
+          this.occupancyRequest !== request || this.tsClient !== client) return;
+      for (const id of mirrorAudience) audience.add(id);
+      this.handleOccupancy(audience.size);
     } catch {
       // ignore — the 30s poll is the fallback
     }
@@ -641,7 +675,7 @@ export class BotInstance extends EventEmitter {
     // Feature 2 (#119): restore + resume the live queue persisted before the
     // last shutdown. Best-effort and gated on savedQueuesEnabled; runs after
     // the bot is fully connected so resolveAndPlay can actually push audio.
-    void this.restoreQueueFromSnapshot();
+    if (!this.mirrorSource) void this.restoreQueueFromSnapshot();
   }
 
   disconnect(): void {
@@ -712,6 +746,7 @@ export class BotInstance extends EventEmitter {
   }
 
   private handleOccupancy(userCount: number): void {
+    if (this.mirrorSource) return;
     // idle-disconnect (unchanged behavior)
     if (userCount <= 0) this._scheduleIdleCheck();
     else this._cancelIdleTimer();
@@ -787,6 +822,7 @@ export class BotInstance extends EventEmitter {
   }
 
   private async handleTextMessage(msg: TS3TextMessage): Promise<void> {
+    if (this.mirrorSource) return;
     const parsed = parseCommand(
       msg.message,
       this.config.commandPrefix,
@@ -873,6 +909,7 @@ export class BotInstance extends EventEmitter {
     msg?: TS3TextMessage,
     requesterName = this.requesterNameFromMessage(msg),
   ): Promise<string | null> {
+    assertIndependentPlayback(this.mirrorSource);
     // Reject commands that would push audio when the bot isn't connected:
     // otherwise ffmpeg spawns and voice goes to a half-initialized or
     // torn-down TS client, leaving player.state="playing" on a disconnected
@@ -1023,6 +1060,7 @@ export class BotInstance extends EventEmitter {
 
   /** Resolve URL for a song and start playing it. Skips to next if URL fails. */
   async resolveAndPlay(song: QueuedSong): Promise<boolean> {
+    assertIndependentPlayback(this.mirrorSource);
     if (!this.connected) {
       this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
       return false;
@@ -1382,6 +1420,7 @@ export class BotInstance extends EventEmitter {
    * lives in exactly one place (#119). Returns true if a track started playing.
    */
   async playSingleSong(song: QueuedSong, requesterName?: string): Promise<boolean> {
+    assertIndependentPlayback(this.mirrorSource);
     const s = this.withRequester(song, requesterName);
     if (this.config.playKeepsQueue && !this.queue.isEmpty()) {
       const insertedAt =
@@ -1428,6 +1467,7 @@ export class BotInstance extends EventEmitter {
     mode: "replace" | "append",
     requesterName?: string,
   ): Promise<void> {
+    assertIndependentPlayback(this.mirrorSource);
     const tagged = songs.map((s) =>
       this.withRequester({ ...(s as QueuedSong) }, requesterName),
     );
@@ -1806,6 +1846,7 @@ export class BotInstance extends EventEmitter {
   }
 
   async startFm(provider: MusicProvider = this.neteaseProvider, requesterName?: string): Promise<string> {
+    assertIndependentPlayback(this.mirrorSource);
     // Match the !fm chat-command guard: refuse before mutating the queue when
     // offline, so the web /fm route can't wipe the queue + flip into FM mode
     // while nothing can actually play.
@@ -2007,6 +2048,7 @@ export class BotInstance extends EventEmitter {
 
   /** Debounce the snapshot writer (~1s) off the stateChange firehose. */
   private scheduleQueueSnapshot(): void {
+    if (this.mirrorSource) return;
     if (!this.config.savedQueuesEnabled) return;
     if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
     this.snapshotTimer = setTimeout(() => this.persistQueueSnapshot(), 1000);
@@ -2099,6 +2141,7 @@ export class BotInstance extends EventEmitter {
    * Returns true if a song actually started playing, false otherwise.
    */
   async playNext(maxRetries = 3): Promise<boolean> {
+    assertIndependentPlayback(this.mirrorSource);
     if (this.isAdvancing || !this.connected) return false;
     this.isAdvancing = true;
     let started = false;
@@ -2189,7 +2232,74 @@ export class BotInstance extends EventEmitter {
     return next;
   }
 
+  /** Output-only instances retain their own identity, nickname and connection. */
+  setMirrorSource(source: () => BotStatus | undefined, queue?: () => QueuedSong[]): void {
+    if (!this.mirrorSource) {
+      this.player.stop();
+      this.spotifyController.stop();
+      this._cancelIdleTimer();
+    }
+    this.mirrorSource = source;
+    this.mirrorQueue = queue ?? null;
+  }
+
+  isMirrorTarget(): boolean { return this.mirrorSource !== null; }
+
+  sendMirroredFrame(frame: Buffer): void {
+    if (this.mirrorSource && this.connected && this.mirrorChannelId &&
+        this.tsClient.getChannelId() === BigInt(this.mirrorChannelId)) {
+      this.tsClient.sendVoiceData(Buffer.from(frame));
+    }
+  }
+
+  setMirrorAudience(audience: (() => Promise<Set<number> | null>) | null): void {
+    this.mirrorAudience = audience;
+  }
+
+  /** A missing self entry or invalid id means the query is not authoritative. */
+  private listenerIds(clients: { id: number; uid?: string }[]): Set<number> | null {
+    const self = this.tsClient.getClientId();
+    if (!clients.some((client) => client.id === self)) return null;
+    const listeners = new Set<number>();
+    for (const client of clients) {
+      if (!Number.isSafeInteger(client.id) || client.id <= 0) return null;
+      if (client.id === self || this.managedVoiceClients.has(this.voiceServerScope, client.id) ||
+          (client.uid && this.managedVoiceClients.hasClientUid(client.uid))) continue;
+      listeners.add(client.id);
+    }
+    return listeners;
+  }
+
+  async getMirrorAudienceIds(): Promise<Set<number> | null> {
+    if (!this.connected) return new Set();
+    const generation = this.lifecycleGeneration;
+    const client = this.tsClient;
+    const channelId = client.getChannelId();
+    try {
+      const clients = await client.getClientsInChannel();
+      if (!this.connected) return new Set();
+      if (this.lifecycleGeneration !== generation || this.tsClient !== client ||
+          client.getChannelId() !== channelId) return null;
+      return this.listenerIds(clients);
+    } catch { return null; }
+  }
+
+  async getMirrorAudienceCount(): Promise<number | null> {
+    const audience = await this.getMirrorAudienceIds();
+    return audience === null ? null : audience.size;
+  }
+
+  notifyMirrorAudienceChanged(returning: boolean): void {
+    if (returning) {
+      this._cancelIdleTimer();
+      this._resumeIfReturning();
+    }
+    void this.refreshOccupancy();
+  }
+
   getStatus(): BotStatus {
+    const source = this.mirrorSource?.();
+    if (source) return { ...source, id: this.id, name: this.name, connected: this.connected };
     const playerState = this.player.getState();
     const recovery = this.streamRecovery;
     const recoveryPaused = playerState === "idle" && recovery?.pauseRequested &&
@@ -2211,7 +2321,7 @@ export class BotInstance extends EventEmitter {
   }
 
   getQueue(): QueuedSong[] {
-    return this.queue.list();
+    return this.mirrorQueue ? structuredClone(this.mirrorQueue()) : this.queue.list();
   }
 
   getPlayer(): AudioPlayer {
@@ -2231,6 +2341,7 @@ export class BotInstance extends EventEmitter {
    * and collide with the running stream), otherwise to the URL player.
    */
   seek(seconds: number): void {
+    assertIndependentPlayback(this.mirrorSource);
     if (this.queue.current()?.platform === "spotify") {
       // The web route + AudioPlayer.seek are seconds-based, but
       // SpotifyController.seek expects milliseconds — convert here.

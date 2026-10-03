@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { loadMirrorConfig, MirrorRelay, type MirrorConfig } from "./mirror.js";
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import {
@@ -90,6 +91,8 @@ export class BotManager extends EventEmitter {
   private avatarStore: AvatarStore;
   private permissions: PermissionStore;
   private configPath: string;
+  private readonly mirror: MirrorConfig | null;
+  private readonly mirrorRelay = new MirrorRelay();
 
   constructor(
     neteaseProvider: MusicProvider,
@@ -131,6 +134,7 @@ export class BotManager extends EventEmitter {
     this.avatarStore = avatarStore;
     this.permissions = permissions;
     this.configPath = configPath;
+    this.mirror = loadMirrorConfig(path.join(path.dirname(configPath), "mirror.json"));
   }
 
   async createBot(params: CreateBotParams): Promise<BotInstance> {
@@ -169,6 +173,7 @@ export class BotManager extends EventEmitter {
     });
 
     this.bots.set(id, bot);
+    this.rewireMirror();
     this.emit("botInstance", bot);
 
     this.database.saveBotInstance({
@@ -195,6 +200,7 @@ export class BotManager extends EventEmitter {
     if (bot) {
       bot.disconnect();
       this.bots.delete(id);
+      this.rewireMirror();
     }
     this.database.deleteBotInstance(id);
     this.permissions.pruneBot(id);
@@ -208,6 +214,10 @@ export class BotManager extends EventEmitter {
   }
 
   updateBot(id: string, params: Partial<CreateBotParams>): void {
+    if (id === this.mirror?.targetBotId &&
+        ["serverAddress", "serverPort", "defaultChannel", "channelId", "channelPassword"].some((key) => key in params)) {
+      throw new Error("Mirror output channel is fixed; edit its saved configuration while stopped");
+    }
     const instances = this.database.getBotInstances();
     const existing = instances.find((i) => i.id === id);
     if (!existing) throw new Error(`Bot ${id} not found`);
@@ -313,6 +323,7 @@ export class BotManager extends EventEmitter {
         spotifyOAuth: this.spotifyOAuth,
       });
       this.bots.set(id, bot);
+      this.rewireMirror();
       this.emit("botInstance", bot);
       await connectWithTimeout(bot, 15_000, this.logger);
       // Mark as autoStart so it reconnects on Docker restart, and persist identity
@@ -337,6 +348,14 @@ export class BotManager extends EventEmitter {
 
   async loadSavedBots(): Promise<void> {
     const savedInstances = this.database.getBotInstances();
+    if (this.mirror) {
+      const source = savedInstances.find((bot) => bot.id === this.mirror!.sourceBotId);
+      const target = savedInstances.find((bot) => bot.id === this.mirror!.targetBotId);
+      if (!source || !target || !target.channelId || !/^[1-9]\d*$/.test(target.channelId) ||
+          source.serverAddress !== target.serverAddress || source.serverPort !== target.serverPort) {
+        throw new Error("Mirror configuration requires existing bots on the same server and a fixed target channelId");
+      }
+    }
     for (const saved of savedInstances) {
       const proto = saved.serverProtocol as "ts3" | "ts6" | "" | undefined;
       const bot = new BotInstance({
@@ -373,6 +392,7 @@ export class BotManager extends EventEmitter {
       });
 
       this.bots.set(saved.id, bot);
+      this.rewireMirror();
       this.emit("botInstance", bot);
 
       // Only auto-connect bots that have autoStart enabled
@@ -414,7 +434,13 @@ export class BotManager extends EventEmitter {
     }
   }
 
+  private rewireMirror(): void {
+    if (!this.mirror) return;
+    this.mirrorRelay.bind(this.bots.get(this.mirror.sourceBotId), this.bots.get(this.mirror.targetBotId));
+  }
+
   shutdown(): void {
+    this.mirrorRelay.dispose();
     for (const bot of this.bots.values()) {
       bot.disconnect();
     }

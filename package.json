@@ -1,7 +1,7 @@
 {
-  "name": "tsmusicbot",
-  "version": "0.1.0",
-  "description": "TeamSpeak music bot with NetEase Cloud Music and QQ Music support",
+  "name": "teamspeak-music-mirror",
+  "version": "1.0.0",
+  "description": "Configurable TeamSpeak music bot with synchronized audio and avatar mirror output",
   "type": "module",
   "engines": {
     "node": "^22.12.0 || >=24.0.0"
