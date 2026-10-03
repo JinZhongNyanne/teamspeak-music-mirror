@@ -49,13 +49,15 @@ export function loadMirrorConfig(
 export class MirrorRelay {
   private unbind: (() => void) | null = null;
 
+  constructor(private readonly manageAudience = true) {}
+
   bind(source: BotInstance | undefined, target: BotInstance | undefined): void {
     this.dispose();
     if (target) target.setMirrorSource(() => source?.getStatus(), () => source?.getQueue() ?? []);
     if (!source) return;
-    source.setMirrorAudience(() => target?.getMirrorAudienceIds() ?? Promise.resolve(new Set<number>()));
+    if (this.manageAudience) source.setMirrorAudience(() => target?.getMirrorAudienceIds() ?? Promise.resolve(new Set<number>()));
     if (!target) {
-      this.unbind = () => source.setMirrorAudience(null);
+      this.unbind = () => { if (this.manageAudience) source.setMirrorAudience(null); };
       return;
     }
     let active = true;
@@ -100,7 +102,7 @@ export class MirrorRelay {
       target.off("mirrorAudienceChanged", audience);
       target.off("connected", audience);
       target.off("disconnected", audience);
-      source.setMirrorAudience(null);
+      if (this.manageAudience) source.setMirrorAudience(null);
     };
   }
 

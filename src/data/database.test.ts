@@ -378,3 +378,32 @@ describe("user music cookies (#164)", () => {
     expect(botDb.getUserMusicCookie("u1", "netease")).toBeNull();
   });
 });
+
+
+describe("mirror scheme migration and persistence", () => {
+  it("adds the empty default to older rows and keeps the binding across reopen and edits", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mirror-database-"));
+    const filename = join(dir, "bots.db");
+    let db = createDatabase(filename);
+    try {
+      const bot: BotInstance = { id: "output", name: "Output", nickname: "Output", serverAddress: "localhost", serverPort: 9987,
+        defaultChannel: "", channelId: "9", channelPassword: "", autoStart: false, serverProtocol: "", ts6ApiKey: "", serverPassword: "", identity: "identity" };
+      db.saveBotInstance(bot);
+      db.db.exec("ALTER TABLE bot_instances DROP COLUMN mirrorSourceBotId");
+      db.close();
+      db = createDatabase(filename);
+      expect(db.getBotInstances()[0]).toMatchObject({ ...bot, mirrorSourceBotId: "" });
+      db.saveBotInstance({ ...db.getBotInstances()[0], mirrorSourceBotId: "source" });
+      db.close();
+      db = createDatabase(filename);
+      expect(db.getBotInstances()[0]).toMatchObject({ mirrorSourceBotId: "source", channelId: "9", identity: "identity" });
+      db.saveBotInstance({ ...db.getBotInstances()[0], name: "Renamed" });
+      expect(db.getBotInstances()[0].mirrorSourceBotId).toBe("source");
+      db.saveBotInstance({ ...db.getBotInstances()[0], mirrorSourceBotId: "" });
+      expect(db.getBotInstances()[0].mirrorSourceBotId).toBe("");
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

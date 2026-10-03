@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { canAccessBot } from "../bot-status.js";
+import { requirePermission } from "../middleware/requirePermission.js";
 import type { BotDatabase } from "../../data/database.js";
 import { SHARED_QUEUE_OWNER } from "../../data/database.js";
 import type { BotManager } from "../../bot/manager.js";
@@ -41,16 +43,24 @@ export function createSavedQueuesRouter(
 
   // POST / — snapshot a bot's CURRENT queue and upsert it.
   // body: { botId, name, shared? }
-  router.post("/", (req, res) => {
+  router.post("/", requirePermission("player.queue"), (req, res) => {
     const userId = req.user!.id;
     const { botId, name, shared } = req.body ?? {};
     if (typeof name !== "string" || !name.trim() || typeof botId !== "string" || !botId) {
       res.status(400).json({ error: "botId and name are required" });
       return;
     }
+    if (req.user!.role !== "admin" && !canAccessBot(req.user!.bots, botId)) {
+      res.status(403).json({ error: "没有访问此机器人的权限。" });
+      return;
+    }
     const bot = botManager.getBot(botId);
     if (!bot) {
       res.status(404).json({ error: "bot not found" });
+      return;
+    }
+    if (bot.isMirrorTarget?.()) {
+      res.status(409).json({ error: "镜像机器人没有独立队列，请在原机器人保存播放清单。" });
       return;
     }
     const songs = bot.getQueueManager().list();
@@ -76,7 +86,7 @@ export function createSavedQueuesRouter(
   });
 
   // POST /:id/load — load a saved queue into a bot. body: { botId, mode }
-  router.post("/:id/load", async (req, res) => {
+  router.post("/:id/load", requirePermission("player.queue"), async (req, res) => {
     const userId = req.user!.id;
     const username = req.user!.username;
     const id = parseInt(req.params.id, 10);
@@ -90,9 +100,17 @@ export function createSavedQueuesRouter(
       res.status(404).json({ error: "not found" });
       return;
     }
+    if (req.user!.role !== "admin" && !canAccessBot(req.user!.bots, botId)) {
+      res.status(403).json({ error: "没有访问此机器人的权限。" });
+      return;
+    }
     const bot = botManager.getBot(botId);
     if (!bot) {
       res.status(404).json({ error: "bot not found" });
+      return;
+    }
+    if (bot.isMirrorTarget?.()) {
+      res.status(409).json({ error: "镜像机器人不能加载独立队列，请在原机器人操作。" });
       return;
     }
     const loadMode = mode === "append" ? "append" : "replace";

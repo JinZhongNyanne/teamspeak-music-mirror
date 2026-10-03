@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia';
+import { isMirrorBot } from '../composables/mirrorBots.js';
 import axios from 'axios';
 import { resolveScopedBot } from './scope.js';
 import { useSession } from '../composables/useSession.js';
@@ -55,6 +56,13 @@ export interface BotStatus {
   volume: number;
   playMode: string;
   elapsed?: number;
+  mode?: 'music' | 'mirror';
+  mirrorSourceBotId?: string;
+  mirrorSourceName?: string;
+  mirrorSourceAccessible?: boolean;
+  mirrorState?: 'source-offline' | 'output-offline' | 'syncing' | 'idle';
+  mirrorConfigLocked?: boolean;
+  fixedChannelId?: string;
 }
 
 export interface PlaylistItem {
@@ -173,6 +181,9 @@ export const usePlayerStore = defineStore('player', {
   getters: {
     activeBot(): BotStatus | null {
       return this.bots.find((b) => b.id === this.activeBotId) ?? this.bots[0] ?? null;
+    },
+    isMirror(): boolean {
+      return isMirrorBot(this.activeBot);
     },
     /** True when the UI is locked to a single bot via a dedicated link. */
     isScoped(): boolean {
@@ -417,6 +428,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playAtIndex(index: number) {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/play-at`, { index });
       this._setTiming(this.activeBotId, { serverElapsed: 0 });
@@ -424,6 +436,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async play(query: string, platform = 'netease') {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/play`, { query, platform });
       this._setTiming(this.activeBotId, { serverElapsed: 0 });
@@ -431,6 +444,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playById(songId: string, platform = 'netease') {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/play-by-id`, { songId, platform });
       this._setTiming(this.activeBotId, { serverElapsed: 0 });
@@ -445,9 +459,11 @@ export const usePlayerStore = defineStore('player', {
      * 检查 B站视频是否为多P，若为多P则弹窗询问，单P则直接修正时长并继续
      */
     async checkBilibiliMultiPart(song: Song, action: 'play' | 'playNext' | 'add'): Promise<boolean> {
+      if (this.isMirror) return true;
       try {
         const cleanBvid = song.id.split('?')[0].split(':')[0];
         const res = await axios.get('/api/music/bilibili/parts', { params: { bvid: cleanBvid } });
+        if (this.isMirror) return true;
         const parts: BiliPart[] = res.data?.parts ?? [];
         if (parts.length > 1) {
           this.biliPartModal = {
@@ -504,11 +520,13 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playSong(song: Song, skipPartCheck = false) {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       if (!skipPartCheck && song.platform === 'bilibili' && !song.id.includes('?p=')) {
         const handled = await this.checkBilibiliMultiPart(song, 'play');
         if (handled) return;
       }
+      if (this.isMirror || !this.activeBotId) return;
       // Guests use the non-destructive "play now" (insert-next + skip) so they
       // can't wipe everyone else's queue; members/admins keep the normal behavior.
       const endpoint = useSession().isGuest.value ? 'play-now-song' : 'play-song';
@@ -521,11 +539,13 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playNextSong(song: Song, skipPartCheck = false) {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       if (!skipPartCheck && song.platform === 'bilibili' && !song.id.includes('?p=')) {
         const handled = await this.checkBilibiliMultiPart(song, 'playNext');
         if (handled) return;
       }
+      if (this.isMirror || !this.activeBotId) return;
       const res = await axios.post(`/api/player/${this.activeBotId}/play-next-song`, { song });
       if (res.data?.message) {
         this.notify(res.data.message, res.data.ok === false ? 'error' : 'info');
@@ -535,25 +555,30 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async addToQueue(query: string, platform = 'netease') {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/add`, { query, platform });
     },
 
     async addToQueueById(songId: string, platform = 'netease') {
+      if (this.isMirror) { this.notify('镜像机器人的队列由原机器人控制，请切换到原机器人。', 'info'); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/add-by-id`, { songId, platform });
     },
 
     async addSong(song: Song, skipPartCheck = false) {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       if (!skipPartCheck && song.platform === 'bilibili' && !song.id.includes('?p=')) {
         const handled = await this.checkBilibiliMultiPart(song, 'add');
         if (handled) return;
       }
+      if (this.isMirror || !this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/add-song`, { song });
     },
 
     async playPlaylist(playlistId: string, platform = 'netease') {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       try {
         const res = await axios.post(`/api/player/${this.activeBotId}/play-playlist`, { playlistId, platform });
@@ -570,6 +595,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async playAlbum(albumId: string, platform = 'netease') {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       try {
         const res = await axios.post(`/api/player/${this.activeBotId}/play-album`, { albumId, platform });
@@ -589,6 +615,7 @@ export const usePlayerStore = defineStore('player', {
      * trips, so the caller gets a "loading" notice first.
      */
     async playArtist(artistId: string, platform = 'netease') {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       this.notify('正在载入该歌手的全部歌曲…', 'info');
       try {
@@ -615,6 +642,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async pause() {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       // Freeze elapsed at the current LIVE interpolated value. Using the cached
       // `elapsed` getter here could snapshot a value up to a few seconds stale.
@@ -626,6 +654,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async resume() {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/resume`);
       this._setTiming(this.activeBotId, {
@@ -636,6 +665,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async next() {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/next`);
       this._setTiming(this.activeBotId, { serverElapsed: 0 });
@@ -643,6 +673,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async prev() {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/prev`);
       this._setTiming(this.activeBotId, { serverElapsed: 0 });
@@ -650,6 +681,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async stop() {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/stop`);
       this._setTiming(this.activeBotId, {
@@ -660,6 +692,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async seek(position: number) {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/seek`, { position });
       this._setTiming(this.activeBotId, { serverElapsed: position });
@@ -667,6 +700,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async setVolume(volume: number) {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/volume`, { volume });
       const bot = this.bots.find((b) => b.id === this.activeBotId);
@@ -674,6 +708,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async setMode(mode: string) {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       await axios.post(`/api/player/${this.activeBotId}/mode`, { mode });
       const bot = this.bots.find((b) => b.id === this.activeBotId);
@@ -681,6 +716,7 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async startFm(platform: Source = 'netease') {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       const res = await axios.post(`/api/player/${this.activeBotId}/fm`, { platform });
       if (res.data?.message) {
@@ -941,6 +977,7 @@ export const usePlayerStore = defineStore('player', {
      * sequentially — capped at 30 tracks to keep the request burst small.
      */
     async playJellyfinGenre(genreId: string) {
+      if (this.isMirror) { this.notify("镜像机器人的播放与队列由原机器人控制，请切换到原机器人。", "info"); return; }
       if (!this.activeBotId) return;
       try {
         const res = await axios.get(`/api/music/jellyfin/genre/${genreId}/songs`, {

@@ -49,13 +49,17 @@
             <div class="bot-card-head" @click="bot.connected ? selectBot(bot.id) : undefined">
               <span class="bot-dot" :class="{ online: bot.connected }" />
               <span class="bot-card-name">{{ bot.name }}</span>
+              <span class="bot-current-badge">{{ isMirrorBot(bot) ? '镜像' : '独立' }}</span>
               <span v-if="bot.id === store.activeBotId" class="bot-current-badge">当前</span>
-              <span v-if="bot.playing && !bot.paused" class="bot-playing-badge">播放中</span>
+              <span v-if="isMirrorBot(bot)" class="bot-idle-badge">{{ mirrorStateLabel(bot) }}</span>
+              <span v-else-if="bot.playing && !bot.paused" class="bot-playing-badge">播放中</span>
               <span v-else-if="bot.paused" class="bot-paused-badge">已暂停</span>
               <span v-else-if="bot.connected" class="bot-idle-badge">空闲</span>
               <span v-else class="bot-offline-badge">离线</span>
             </div>
+            <p v-if="isMirrorBot(bot)" class="mirror-source-label">原机器人：{{ bot.mirrorSourceName || (bot.mirrorSourceAccessible === false ? '无权访问' : bot.mirrorSourceBotId || '未指定') }}</p>
             <div class="bot-card-controls">
+              <button v-if="isMirrorBot(bot) && accessibleSource(bot.id)" class="bot-ctrl-btn primary" @click.stop="goToSource(bot.id); dropdownOpen = false">控制原机器人</button>
               <button
                 v-if="bot.connected"
                 class="bot-ctrl-btn danger"
@@ -73,25 +77,26 @@
                 <Icon icon="mdi:link-variant" /> 连接
               </button>
               <button
-                v-if="bot.playing || bot.paused"
+                v-if="!isMirrorBot(bot) && (can('player.control') || guestCan('transport')) && (bot.playing || bot.paused)"
                 class="bot-ctrl-btn"
                 :disabled="!bot.connected"
-                @click.stop="store.pause()"
+                @click.stop="controlBot(bot.id, 'pause')"
               >
                 <Icon icon="mdi:stop" /> 停止
               </button>
               <button
-                v-else
+                v-else-if="!isMirrorBot(bot) && (can('player.control') || guestCan('transport'))"
                 class="bot-ctrl-btn"
                 :disabled="!bot.connected"
-                @click.stop="store.resume()"
+                @click.stop="controlBot(bot.id, 'resume')"
               >
                 <Icon icon="mdi:play" /> 播放
               </button>
               <button
+                v-if="!isMirrorBot(bot) && (can('player.control') || guestCan('skip'))"
                 class="bot-ctrl-btn"
                 :disabled="!bot.connected || (!bot.playing && !bot.paused)"
-                @click.stop="store.next()"
+                @click.stop="controlBot(bot.id, 'next')"
                 title="下一首"
               >
                 <Icon icon="mdi:skip-next" />
@@ -146,11 +151,14 @@ import { computed, ref, onMounted, onUnmounted, nextTick, reactive } from 'vue';
 import { useRouter } from 'vue-router';
 import { Icon } from '@iconify/vue';
 import { usePlayerStore } from '../stores/player.js';
+import { isMirrorBot, mirrorStateLabel } from '../composables/mirrorBots.js';
+import { useMirrorSourceNavigation } from '../composables/useMirrorSourceNavigation.js';
 import { useSession } from '../composables/useSession.js';
 
 const store = usePlayerStore();
 const session = useSession();
-const { canControlBot } = session;
+const { canControlBot, can, guestCan } = session;
+const { accessibleSource, goToSource } = useMirrorSourceNavigation();
 const navRouter = useRouter();
 
 async function onLogout() {
@@ -183,6 +191,12 @@ const linkDialog = reactive({
   name: '',
   copied: false,
 });
+
+async function controlBot(id: string, action: 'pause' | 'resume' | 'next') {
+  if (isMirrorBot(store.bots.find(bot => bot.id === id))) return;
+  store.setActiveBotId(id);
+  await store[action]();
+}
 
 function selectBot(id: string) {
   store.setActiveBotId(id);
@@ -303,6 +317,7 @@ onUnmounted(() => {
 </script>
 
 <style lang="scss" scoped>
+.mirror-source-label { margin: 0 12px 8px; color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
 .navbar {
   position: fixed;
   top: 0;

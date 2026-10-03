@@ -2,6 +2,7 @@
   <div class="app" :data-theme="theme">
     <Navbar />
     <main class="main-content">
+      <MirrorNotice />
       <RouterView />
     </main>
     <Player />
@@ -31,7 +32,7 @@
         <div class="m-player-artist">{{ currentSong.artist }}</div>
       </div>
       <div class="m-player-controls" @click.stop>
-        <button v-if="can('player.control')" class="m-player-btn" @click="playerStore.prev()">
+        <button v-if="!playerStore.isMirror && can('player.control')" class="m-player-btn" @click="playerStore.prev()">
           <Icon icon="mdi:skip-previous" />
         </button>
         <button v-if="canTransport" class="m-player-btn" @click="playerStore.isPlaying ? playerStore.pause() : playerStore.resume()">
@@ -50,7 +51,7 @@
           <Icon icon="mdi:volume-high" />
         </button>
       </div>
-      <div v-if="mobileVolumeOpen" class="m-volume-popover" @click.stop>
+      <div v-if="mobileVolumeOpen && !playerStore.isMirror" class="m-volume-popover" @click.stop>
         <Icon icon="mdi:volume-high" class="m-volume-icon" />
         <input
           type="range"
@@ -98,6 +99,7 @@ import { usePlayerStore } from './stores/player.js';
 import { useDecoupledSlider } from './composables/useDecoupledSlider.js';
 import { useWebSocket } from './composables/useWebSocket.js';
 import { useSession } from './composables/useSession.js';
+import MirrorNotice from './components/MirrorNotice.vue';
 import Navbar from './components/Navbar.vue';
 import Player from './components/Player.vue';
 import CoverArt from './components/CoverArt.vue';
@@ -109,9 +111,9 @@ const playerStore = usePlayerStore();
 const session = useSession();
 const { can, guestCan } = session;
 // Mobile mini-player transport gating — mirrors components/Player.vue.
-const canTransport = computed(() => can('player.control') || guestCan('transport'));
-const canSkip = computed(() => can('player.control') || guestCan('skip'));
-const canModeCtl = computed(() => can('player.control') || guestCan('playMode'));
+const canTransport = computed(() => !playerStore.isMirror && (can('player.control') || guestCan('transport')));
+const canSkip = computed(() => !playerStore.isMirror && (can('player.control') || guestCan('skip')));
+const canModeCtl = computed(() => !playerStore.isMirror && (can('player.control') || guestCan('playMode')));
 const theme = computed(() => playerStore.theme);
 const route = useRoute();
 const router = useRouter();

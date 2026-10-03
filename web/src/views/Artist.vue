@@ -138,7 +138,7 @@ const { can, guestCan } = useSession();
 
 // Same permission as "play all" on a playlist: members need player.control,
 // guests need the playCollection flag.
-const canPlayAll = computed(() => can('player.control') || guestCan('playCollection'));
+const canPlayAll = computed(() => !store.isMirror && (can('player.control') || guestCan('playCollection')));
 const canShuffle = computed(() =>
   canPlayAll.value && (can('player.control') || guestCan('playMode')),
 );

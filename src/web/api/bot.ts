@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { botStatusForScope, canAccessBot } from "../bot-status.js";
 import type { BotManager } from "../../bot/manager.js";
 import type { BotConfig, GuestModeConfig, SpotifyConfig, JellyfinConfig, GateableProvider } from "../../data/config.js";
 import { saveConfig, GATEABLE_PROVIDERS } from "../../data/config.js";
@@ -33,6 +34,24 @@ export function createBotRouter(
 ): Router {
   const router = Router();
 
+  function validateMirrorSource(req: import("express").Request, res: import("express").Response, value: unknown): boolean {
+    if (req.body.autoStart !== undefined && typeof req.body.autoStart !== "boolean") {
+      res.status(400).json({ error: "autoStart 必须是布尔值。" });
+      return false;
+    }
+    if (value === undefined) return true;
+    if (typeof value !== "string") {
+      res.status(400).json({ error: "mirrorSourceBotId 必须是字符串，空字符串表示独立播放。" });
+      return false;
+    }
+    if (value.trim() && req.user!.role !== "admin" && !canAccessBot(req.user!.bots, value.trim())) {
+      res.status(403).json({ error: "没有访问原机器人的权限。" });
+      return false;
+    }
+    return true;
+  }
+
+
   // Masked spotify view shared by the GET response and the POST echo. The raw
   // clientSecret is write-only and NEVER serialized — only whether one is stored.
   const maskedSpotify = () => ({
@@ -56,8 +75,9 @@ export function createBotRouter(
   });
 
   router.get("/", (req, res) => {
-    const all = botManager.getAllBots().map((b) => b.getStatus());
     const u = req.user!;
+    const scope = u.role === "admin" ? "all" : u.bots;
+    const all = botManager.getAllBots().map((b) => botStatusForScope(botManager, b, scope));
     const bots =
       u.role === "admin" || u.bots === "all"
         ? all
@@ -298,7 +318,7 @@ export function createBotRouter(
       res.status(404).json({ error: "Bot not found" });
       return;
     }
-    res.json(bot.getStatus());
+    res.json(botStatusForScope(botManager, bot, req.user!.role === "admin" ? "all" : req.user!.bots));
   });
 
   // Get saved config for a bot
@@ -311,7 +331,9 @@ export function createBotRouter(
     // Never expose the TS identity / API key to the client; the edit form only
     // consumes channel/server passwords.
     const { ts6ApiKey: _ts6ApiKey, identity: _identity, ...safe } = saved as unknown as Record<string, unknown>;
-    res.json(safe);
+    const sourceId = safe.mirrorSourceBotId;
+    const accessible = typeof sourceId !== "string" || !sourceId || req.user!.role === "admin" || canAccessBot(req.user!.bots, sourceId);
+    res.json({ ...safe, mirrorSourceAccessible: accessible, ...(!accessible ? { mirrorSourceBotId: undefined, mirrorSourceName: undefined, mirrorConfigLocked: true } : {}) });
   });
 
   router.get("/:id/avatar", requirePermission("bot.manage"), requireBotAccess("id"), (req, res) => {
@@ -334,6 +356,14 @@ export function createBotRouter(
     res.set("Content-Type", mime);
     res.set("Cache-Control", "no-cache");
     res.send(buf);
+  });
+
+  router.use("/:id/avatar", requirePermission("bot.manage"), requireBotAccess("id"), (req, res, next) => {
+    if (req.method !== "GET" && botManager.getBot(req.params.id)?.isMirrorTarget?.()) {
+      res.status(409).json({ error: "镜像机器人的头像自动跟随原机器人，请修改原机器人的头像。" });
+      return;
+    }
+    next();
   });
 
   router.put("/:id/avatar", requirePermission("bot.manage"), requireBotAccess("id"), (req, res) => {
@@ -390,7 +420,9 @@ export function createBotRouter(
         channelPassword,
         serverPassword,
         autoStart,
+        mirrorSourceBotId,
       } = req.body;
+      if (!validateMirrorSource(req, res, mirrorSourceBotId)) return;
       if (!name || !serverAddress || !nickname) {
         res
           .status(400)
@@ -407,11 +439,12 @@ export function createBotRouter(
         channelPassword,
         serverPassword,
         autoStart: autoStart ?? false,
+        mirrorSourceBotId,
       });
-      res.status(201).json(bot.getStatus());
+      res.status(201).json(botStatusForScope(botManager, bot, req.user!.role === "admin" ? "all" : req.user!.bots));
     } catch (err) {
       logger.error({ err }, "Failed to create bot");
-      res.status(500).json({ error: (err as Error).message });
+      res.status((err as { statusCode?: number }).statusCode ?? 500).json({ error: (err as Error).message });
     }
   });
 
@@ -423,15 +456,16 @@ export function createBotRouter(
         res.status(404).json({ error: "Bot not found" });
         return;
       }
-      const { name, serverAddress, serverPort, nickname, defaultChannel, channelId, channelPassword, serverPassword } = req.body;
+      const { name, serverAddress, serverPort, nickname, defaultChannel, channelId, channelPassword, serverPassword, autoStart, mirrorSourceBotId } = req.body;
+      if (!validateMirrorSource(req, res, mirrorSourceBotId)) return;
       // Update in database
       botManager.updateBot(req.params.id, {
-        name, serverAddress, serverPort, nickname, defaultChannel, channelId, channelPassword, serverPassword,
+        name, serverAddress, serverPort, nickname, defaultChannel, channelId, channelPassword, serverPassword, autoStart, mirrorSourceBotId,
       });
       res.json({ success: true });
     } catch (err) {
       logger.error({ err }, "Failed to update bot");
-      res.status(500).json({ error: (err as Error).message });
+      res.status((err as { statusCode?: number }).statusCode ?? 500).json({ error: (err as Error).message });
     }
   });
 
@@ -440,7 +474,7 @@ export function createBotRouter(
       await botManager.removeBot(req.params.id);
       res.json({ success: true });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status((err as { statusCode?: number }).statusCode ?? 500).json({ error: (err as Error).message });
     }
   });
 
@@ -449,7 +483,7 @@ export function createBotRouter(
       await botManager.startBot(req.params.id);
       res.json({ success: true });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status((err as { statusCode?: number }).statusCode ?? 500).json({ error: (err as Error).message });
     }
   });
 
@@ -458,7 +492,7 @@ export function createBotRouter(
       botManager.stopBot(req.params.id);
       res.json({ success: true });
     } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
+      res.status((err as { statusCode?: number }).statusCode ?? 500).json({ error: (err as Error).message });
     }
   });
 

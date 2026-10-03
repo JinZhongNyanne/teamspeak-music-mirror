@@ -51,120 +51,7 @@
       <PersonalNeteaseAccount v-if="providerOn('netease') && !session.isGuest.value" />
     </section>
 
-    <!-- Bot Management (create/edit/delete/start-stop) requires bot.manage -->
-    <section v-if="can('bot.manage')" class="settings-section">
-      <h2 class="section-title">机器人管理</h2>
-      <div class="bot-list">
-        <div v-for="bot in store.bots" :key="bot.id" class="bot-item">
-          <div class="bot-info">
-            <div class="bot-name">{{ bot.name }}</div>
-            <div class="bot-status" :class="botStatusClass(bot)">
-              {{ botStatusText(bot) }}
-            </div>
-          </div>
-          <div class="bot-actions">
-            <button class="btn-sm" @click="toggleBot(bot.id, bot.connected)">
-              {{ bot.connected ? '停止' : '启动' }}
-            </button>
-            <button class="btn-sm btn-edit" @click="openEditBot(bot)">
-              <Icon icon="mdi:pencil" />
-            </button>
-            <button class="btn-sm btn-delete" @click="deleteBot(bot.id, bot.name)">
-              <Icon icon="mdi:delete" />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Edit Bot Modal -->
-      <div v-if="editingBot" class="edit-modal-overlay" @click.self="editingBot = null">
-        <div class="edit-modal">
-          <h3 class="modal-title">编辑机器人</h3>
-          <div class="form-group">
-            <label>名称</label>
-            <input v-model="editForm.name" class="input" />
-          </div>
-          <div class="form-group">
-            <label>服务器地址</label>
-            <input v-model="editForm.serverAddress" class="input" placeholder="ts.example.com" />
-          </div>
-          <div class="form-row">
-            <div class="form-group" style="flex:1">
-              <label>端口</label>
-              <input v-model.number="editForm.serverPort" type="number" class="input" />
-            </div>
-            <div class="form-group" style="flex:2">
-              <label>昵称</label>
-              <input v-model="editForm.nickname" class="input" />
-            </div>
-          </div>
-          <div class="form-group">
-            <label>默认频道名称（可选）</label>
-            <input v-model="editForm.defaultChannel" :disabled="!!editForm.channelId" class="input" :class="{ disabled: !!editForm.channelId }" placeholder="音乐频道" />
-          </div>
-          <div class="form-group">
-            <label>默认频道ID（可选）</label>
-            <input v-model="editForm.channelId" :disabled="!!editForm.defaultChannel" class="input" :class="{ disabled: !!editForm.defaultChannel }" placeholder="如 12" />
-          </div>
-          <div class="form-group">
-            <label>频道密码（可选）</label>
-            <input v-model="editForm.channelPassword" class="input" type="password" />
-          </div>
-          <div class="form-group">
-            <label>服务器密码（可选）</label>
-            <input v-model="editForm.serverPassword" class="input" type="password" placeholder="服务器有密码时填写" />
-          </div>
-          <div class="form-group">
-            <label>自定义头像</label>
-            <CustomAvatarRow :bot-id="editingBot" />
-          </div>
-          <div class="modal-actions">
-            <button class="btn-secondary" @click="editingBot = null">取消</button>
-            <button class="btn-primary" @click="saveEditBot">保存（需重启机器人生效）</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Create Bot -->
-      <div class="create-bot">
-        <h3 class="subsection-title">创建新实例</h3>
-        <div class="form-group">
-          <label>名称</label>
-          <input v-model="newBotName" class="input" placeholder="我的音乐机器人" />
-        </div>
-        <div class="form-row">
-          <div class="form-group" style="flex:2">
-            <label>服务器地址</label>
-            <input v-model="newBotServer" class="input" placeholder="localhost 或 ts.example.com" />
-          </div>
-          <div class="form-group" style="flex:1">
-            <label>端口</label>
-            <input v-model.number="newBotPort" type="number" class="input" placeholder="9987" />
-          </div>
-        </div>
-        <div class="form-group">
-          <label>昵称</label>
-          <input v-model="newBotNickname" class="input" placeholder="MusicBot" />
-        </div>
-        <div class="form-group">
-          <label>默认频道名称（可选）</label>
-          <input v-model="newBotChannel" :disabled="!!newBotChannelId" class="input" :class="{ disabled: !!newBotChannelId }" placeholder="音乐频道" />
-        </div>
-        <div class="form-group">
-          <label>默认频道ID（可选）</label>
-          <input v-model="newBotChannelId" :disabled="!!newBotChannel" class="input" :class="{ disabled: !!newBotChannel }" placeholder="如 12" />
-        </div>
-        <div class="form-group">
-          <label>服务器密码（可选）</label>
-          <input v-model="newBotServerPassword" class="input" type="password" placeholder="服务器有密码时填写" />
-        </div>
-        <div class="form-group">
-          <label>自定义头像（可选）</label>
-          <AvatarUpload v-model="newBotAvatar" />
-        </div>
-        <button class="btn-primary" @click="createBot">创建</button>
-      </div>
-    </section>
+    <BotManagement v-if="can('bot.manage')" />
 
     <!-- Jellyfin — optional self-hosted music source. Admin-configured
          connection (server URL + credentials), no QR flow. The card stays
@@ -952,10 +839,10 @@
     <!-- Bot Profile (TeamSpeak Behavior) -->
     <section v-if="can('bot.manage')" class="settings-section">
       <h2 class="section-title">机器人 Profile（TeamSpeak 行为）</h2>
-      <p class="profile-section-hint">控制 bot 在 TeamSpeak 上自动同步歌曲信息的方式。⚠️ 标记的项会触发频道里所有人的提示音。</p>
+      <p class="profile-section-hint">镜像机器人的头像和歌曲信息跟随原机器人，请配置原机器人的 Profile。控制 bot 在 TeamSpeak 上自动同步歌曲信息的方式。⚠️ 标记的项会触发频道里所有人的提示音。</p>
       <div v-if="store.bots.length === 0" class="empty-hint">还没有机器人，先在上面创建一个。</div>
       <div v-else class="profile-bot-list">
-        <div v-for="bot in store.bots" :key="bot.id" class="profile-bot">
+        <div v-for="bot in store.bots.filter(bot => !isMirrorBot(bot))" :key="bot.id" class="profile-bot">
           <button
             class="profile-bot-header"
             :class="{ expanded: profileExpanded[bot.id] }"
@@ -1214,7 +1101,8 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { Icon } from '@iconify/vue';
 import axios from 'axios';
-import AvatarUpload from '../components/AvatarUpload.vue';
+import { isMirrorBot } from '../composables/mirrorBots.js';
+import BotManagement from '../components/BotManagement.vue';
 import CustomAvatarRow from '../components/CustomAvatarRow.vue';
 import PersonalNeteaseAccount from '../components/PersonalNeteaseAccount.vue';
 import QRCode from 'qrcode';
@@ -1230,42 +1118,6 @@ import {
 } from '../composables/useSpotifySettings.js';
 
 const store = usePlayerStore();
-
-function botStatusClass(bot: any) {
-  if (!bot.connected) return 'offline';
-  if (bot.playing) return 'playing';
-  if (bot.paused) return 'paused';
-  return 'online';
-}
-
-function botStatusText(bot: any) {
-  if (!bot.connected) return '离线';
-  if (bot.playing) return '播放中';
-  if (bot.paused) return '已暂停';
-  return '在线';
-}
-
-const newBotName = ref('');
-const newBotServer = ref('');
-const newBotPort = ref(9987);
-const newBotNickname = ref('MusicBot');
-const newBotChannel = ref('');
-const newBotChannelId = ref('');
-const newBotServerPassword = ref('');
-const newBotAvatar = ref<string | null>(null);
-
-// Edit bot
-const editingBot = ref<string | null>(null);
-const editForm = reactive({
-  name: '',
-  serverAddress: '',
-  serverPort: 9987,
-  nickname: '',
-  defaultChannel: '',
-  channelId: '',
-  channelPassword: '',
-  serverPassword: '',
-});
 
 const neteaseCookie = ref('');
 const qqCookie = ref('');
@@ -1593,104 +1445,6 @@ async function pollQrStatus(platform: string) {
     }
   } catch {
     // Ignore poll errors
-  }
-}
-
-async function createBot() {
-  if (!newBotName.value || !newBotServer.value) return;
-  try {
-    const res = await axios.post('/api/bot', {
-      name: newBotName.value,
-      serverAddress: newBotServer.value,
-      serverPort: newBotPort.value || 9987,
-      nickname: newBotNickname.value || newBotName.value,
-      defaultChannel: newBotChannel.value || undefined,
-      channelId: newBotChannelId.value || undefined,
-      serverPassword: newBotServerPassword.value || undefined,
-      autoStart: false,
-    });
-    if (newBotAvatar.value && res.data?.id) {
-      try {
-        await axios.put(`/api/bot/${res.data.id}/avatar`, { dataUrl: newBotAvatar.value });
-      } catch (err) {
-        console.warn('failed to set avatar on new bot', err);
-      }
-    }
-    newBotName.value = '';
-    newBotServer.value = '';
-    newBotPort.value = 9987;
-    newBotNickname.value = 'MusicBot';
-    newBotChannel.value = '';
-    newBotChannelId.value = '';
-    newBotServerPassword.value = '';
-    newBotAvatar.value = null;
-    await store.fetchBots();
-  } catch {
-    // Ignore
-  }
-}
-
-async function deleteBot(botId: string, botName: string) {
-  if (!confirm(`确认删除机器人 "${botName}"？此操作不可撤销。`)) return;
-  try {
-    await axios.delete(`/api/bot/${botId}`);
-    // If deleted bot was the active one, reset activeBotId
-    if (store.activeBotId === botId) {
-      store.activeBotId = null;
-    }
-    store.removeBotStatus(botId);
-    await store.fetchBots();
-  } catch {
-    // Ignore
-  }
-}
-
-async function openEditBot(bot: any) {
-  editingBot.value = bot.id;
-  editForm.name = bot.name;
-  // Fetch saved config to fill all fields
-  try {
-    const res = await axios.get(`/api/bot/${bot.id}/config`);
-    editForm.serverAddress = res.data.serverAddress ?? '';
-    editForm.serverPort = res.data.serverPort ?? 9987;
-    editForm.nickname = res.data.nickname ?? '';
-    editForm.defaultChannel = res.data.defaultChannel ?? '';
-    editForm.channelId = res.data.channelId ?? '';
-    editForm.channelPassword = res.data.channelPassword ?? '';
-    editForm.serverPassword = res.data.serverPassword ?? '';
-  } catch {
-    // Config not found — use defaults
-    editForm.serverAddress = '';
-    editForm.serverPort = 9987;
-    editForm.nickname = bot.name;
-    editForm.defaultChannel = '';
-    editForm.channelId = '';
-    editForm.channelPassword = '';
-    editForm.serverPassword = '';
-  }
-}
-
-async function saveEditBot() {
-  if (!editingBot.value) return;
-  try {
-    await axios.put(`/api/bot/${editingBot.value}`, editForm);
-    editingBot.value = null;
-    await store.fetchBots();
-  } catch {
-    // Ignore
-  }
-}
-
-async function toggleBot(botId: string, connected: boolean) {
-  try {
-    if (connected) {
-      await axios.post(`/api/bot/${botId}/stop`);
-    } else {
-      await axios.post(`/api/bot/${botId}/start`);
-    }
-    await store.fetchBots();
-  } catch {
-    // Ignore
   }
 }
 

@@ -1,5 +1,5 @@
 <template>
-  <div v-if="modal.open" class="edit-modal-overlay" @click.self="store.closeBilibiliPartModal">
+  <div v-if="modal.open && !store.isMirror" class="edit-modal-overlay" @click.self="store.closeBilibiliPartModal">
     <div class="edit-modal">
       <h3 class="modal-title">选择分P</h3>
 
@@ -55,6 +55,7 @@ const store = usePlayerStore();
 const modal = computed(() => store.biliPartModal);
 
 const selectedPart = ref<BiliPart | null>(null);
+watch(() => store.isMirror, (mirror) => { if (mirror) store.closeBilibiliPartModal(); });
 
 // 弹窗打开时默认选中第 1 P
 watch(

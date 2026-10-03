@@ -8,6 +8,34 @@ import { createUserStore } from "../data/users.js";
 import { createSessionStore } from "../data/sessions.js";
 import { validateSessionFromHeaders, SESSION_COOKIE_NAME } from "./auth/validateSession.js";
 import { setupWebSocket } from "./websocket.js";
+import { EventEmitter } from "node:events";
+
+describe("WebSocket mirror source visibility", () => {
+  it("filters member bots and hides inaccessible source details in init and live updates", () => {
+    const source = Object.assign(new EventEmitter(), { id: "source", getStatus: () => ({ id: "source" }), getQueue: () => [] });
+    const mirror = Object.assign(new EventEmitter(), { id: "mirror", getStatus: () => ({ id: "mirror" }), getQueue: () => [] });
+    const manager = Object.assign(new EventEmitter(), {
+      getAllBots: () => [source, mirror], getBot: (id: string) => id === "mirror" ? mirror : source,
+      getBotMirrorInfo: (id: string) => id === "mirror" ? { mode: "mirror", mirrorSourceBotId: "source", mirrorSourceName: "Hidden source" } : { mode: "music" },
+    });
+    let connect!: (ws: any) => void;
+    const wss = { on: (_ev: string, cb: any) => { connect = cb; } };
+    const restricted: any[] = [], full: any[] = [];
+    const ws = (scope: "all" | Set<string>, output: any[]) => ({ isGuest: false, botScope: scope, readyState: 1, on() {}, send: (body: string) => output.push(JSON.parse(body)) });
+    const controller = setupWebSocket(wss as any, manager as any, { debug() {}, error() {} } as any);
+    try {
+      connect(ws(new Set(["mirror"]), restricted)); connect(ws("all", full));
+      expect(restricted[0].bots).toHaveLength(1);
+      expect(restricted[0].bots[0]).toMatchObject({ mode: "mirror", mirrorSourceAccessible: false });
+      expect(restricted[0].bots[0]).not.toHaveProperty("mirrorSourceName");
+      mirror.emit("stateChange");
+      expect(restricted.at(-1).status).not.toHaveProperty("mirrorSourceBotId");
+      expect(full.at(-1).status).toMatchObject({ mirrorSourceName: "Hidden source", mirrorSourceAccessible: true });
+      source.emit("stateChange");
+      expect(restricted).toHaveLength(2);
+    } finally { controller.cleanup(); }
+  });
+});
 
 function buildServer(sessions: ReturnType<typeof createSessionStore>) {
   const app = express();

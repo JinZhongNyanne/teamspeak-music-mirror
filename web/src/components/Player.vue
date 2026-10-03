@@ -100,10 +100,10 @@ const router = useRouter();
 const showQueue = ref(false);
 
 const { can, guestCan } = useSession();
-const canControl = computed(() => can('player.control'));
-const canTransport = computed(() => can('player.control') || guestCan('transport'));
-const canSkip = computed(() => can('player.control') || guestCan('skip'));
-const canModeCtl = computed(() => can('player.control') || guestCan('playMode'));
+const canControl = computed(() => !store.isMirror && can('player.control'));
+const canTransport = computed(() => !store.isMirror && (can('player.control') || guestCan('transport')));
+const canSkip = computed(() => !store.isMirror && (can('player.control') || guestCan('skip')));
+const canModeCtl = computed(() => !store.isMirror && (can('player.control') || guestCan('playMode')));
 
 const store = usePlayerStore();
 const activeBot = computed(() => store.activeBot);

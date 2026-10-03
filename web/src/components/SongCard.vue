@@ -37,7 +37,7 @@
 import { computed } from 'vue';
 import { Icon } from '@iconify/vue';
 import CoverArt from './CoverArt.vue';
-import { Song } from '../stores/player.js';
+import { usePlayerStore, type Song } from '../stores/player.js';
 import { useSession } from '../composables/useSession.js';
 
 defineProps<{
@@ -47,9 +47,10 @@ defineProps<{
 }>();
 
 const { can, guestCan } = useSession();
-const showPlay = computed(() => can('player.control') || guestCan('playNow'));
-const showPlayNext = computed(() => can('player.control') || guestCan('playNext'));
-const showAdd = computed(() => can('player.queue') || guestCan('addToQueue'));
+const store = usePlayerStore();
+const showPlay = computed(() => !store.isMirror && (can('player.control') || guestCan('playNow')));
+const showPlayNext = computed(() => !store.isMirror && (can('player.control') || guestCan('playNext')));
+const showAdd = computed(() => !store.isMirror && (can('player.queue') || guestCan('addToQueue')));
 
 const emit = defineEmits<{
   play: [];

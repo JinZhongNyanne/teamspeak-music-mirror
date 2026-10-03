@@ -282,6 +282,19 @@ describe("output-only BotInstance", () => {
     expect(queue).toEqual([{ id: "song", name: "original", artists: ["artist"] }]);
   });
 
+  it("clears both source callbacks when switched back to independent playback", () => {
+    const localQueue = [{ id: "local" }];
+    const bot = Object.assign(Object.create(BotInstance.prototype), {
+      mirrorSource: () => ({ id: "source" }),
+      mirrorQueue: () => [{ id: "mirrored" }],
+      queue: { list: () => localQueue },
+    });
+    bot.setMirrorSource(null);
+    expect(bot.isMirrorTarget()).toBe(false);
+    expect(bot.getQueue()).toBe(localQueue);
+    expect(bot.mirrorQueue).toBeNull();
+  });
+
   it("preserves manual pauses and never idle-disconnects the output", () => {
     const bot = Object.assign(Object.create(BotInstance.prototype), {
       connected: true, autoPaused: false, idleTimer: null,

@@ -4,7 +4,7 @@
 
 ## GHCR 自动构建
 
-GitHub Actions 工作流位于 [docker-publish.yml](../.github/workflows/docker-publish.yml)。默认主分支更新和版本 tag 推送触发构建，也可手动触发。镜像发布到 `ghcr.io/<owner>/teamspeak-music-mirror`，所有者使用小写名称。主分支镜像使用 `:main`，发布 tag 按工作流生成版本标签；正式部署建议固定版本或 digest。
+GitHub Actions 工作流位于 [docker-publish.yml](../.github/workflows/docker-publish.yml)。默认主分支更新和版本 tag 推送触发构建，也可手动触发。镜像发布到 `ghcr.io/<owner>/<repository>`，所有者使用小写名称。主分支镜像使用 `:main`，发布 tag 按工作流生成版本标签；正式部署建议固定版本或 digest。
 
 在 GitHub 仓库中启用 Actions，并允许工作流发布 Packages。工作流使用仓库的 `GITHUB_TOKEN`，不需要将个人令牌提交到仓库。首次发布后检查 GHCR 包的可见性；公开仓库不代表包必然已经公开。公开部署建议把包设置为 Public，使 Docker 和 TrueNAS 可匿名拉取。
 
@@ -21,7 +21,7 @@ docker build -f scripts/docker/Dockerfile -t teamspeak-music-mirror:local .
 ```bash
 export DATA_PATH=/path/to/teamspeak-music-mirror/data
 export MEDIA_PATH=/path/to/media
-export TSMUSICBOT_IMAGE=ghcr.io/<owner>/teamspeak-music-mirror:main
+export TSMUSICBOT_IMAGE=ghcr.io/<owner>/<repository>:main
 docker compose pull
 docker compose up -d --no-build
 ```
@@ -41,7 +41,7 @@ docker compose up -d --no-build
 ```yaml
 services:
   teamspeak-music-mirror:
-    image: ghcr.io/<owner>/teamspeak-music-mirror:<version>
+    image: ghcr.io/<owner>/<repository>:<version>
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -68,18 +68,11 @@ services:
 
 ## 从旧 music-bot 整体迁移
 
-迁移需暂停旧应用，避免 SQLite 数据、同一 TeamSpeak 身份和音乐会话被两个实例同时使用。
+遵循先部署、验证新应用，再切换和停用旧应用的流程。旧应用运行期间先用 SQLite backup API 制作一致性副本，其他持久数据复制到独立路径；新副本禁用 autoStart，使用临时 WebUI 端口部署，避免复用正在服务的 TeamSpeak 身份。
 
-1. 记录旧应用镜像版本、data 挂载位置、端口、代理及媒体挂载，准备受保护的完整数据备份。新应用的数据目录与旧应用分开。
-2. **先正常停止旧应用并确认容器已退出，再复制 data。** SQLite 可能使用 WAL，运行中仅复制 `.db` 不能保证一致性。停止后复制整个数据目录，包含可能仍存在的 `-wal`、`-shm` 文件，保留文件属性。不要手工删除这些文件。
-3. 将副本挂载到新应用 `/app/data`。保留原数据库、`config.json`、Cookie、头像和身份；这样管理员、权限、机器人 ID、历史和保存队列可以随数据迁移。启用了自动恢复的播放队列会按应用规则恢复，通常从当前歌曲开头开始。
-4. 确认副本权限允许新容器写入。在复制的 `mirror.json` 或新应用环境中设置现有 source/target ID。已有数字 target 频道和 `autoStart` 设置可保留。
-5. 旧应用保持停止，启动新应用。检查 WebUI 管理员登录、机器人连接、队列、头像、两间房音频及固定频道权限；确认网络和各音源可用。
-6. 迁移完成后保留停止的旧应用和原始备份作为回退，不要让旧应用自动重启。可继续使用原 WebUI 端口，使现有访问入口保持可用。
+完成健康、管理员、方案配置、持久化和使用独立测试身份的功能验证后，准备回退，在切换窗口刷新数据副本、交接原身份/频道与入口。两应用不能共享可写库或同时连接同一身份。切换会短暂中断播放。新应用和入口验证成功后旧应用保持停止，原数据保留；失败则先停止新应用，再恢复旧应用。
 
-不要让两个应用同时连接同一 TeamSpeak 身份，也不要让双方共享可写数据库目录。新应用会写入自己的数据副本，旧目录保留为迁移时的回退点。
-
-回退时先停止新应用，确认退出，再启动旧应用使用其原始目录和原镜像。新应用运行期间产生的新数据不会自动回流到旧副本；如需恢复这些变更，应另行制定数据迁移方案。
+完整流程及旧镜像关系改为网页管理的说明已写在 [README 的迁移章节](../README.md#旧应用迁移和回退)。不要在运行中只复制 .db，或把旧实时 WAL 混入 SQLite backup 得到的副本。
 
 ## 更新
 

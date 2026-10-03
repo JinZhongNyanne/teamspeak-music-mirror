@@ -19,7 +19,7 @@
     </section>
 
     <!-- 私人FM（音源按 enabledProviders 门控；Jellyfin 电台优先） -->
-    <section v-if="fmCardCount > 0" class="section">
+    <section v-if="fmCardCount > 0 && !store.isMirror" class="section">
       <h2 class="section-title">私人FM</h2>
       <div v-if="enabled('jellyfin')" class="fm-card hover-scale" @click="playFm('jellyfin')">
         <div class="fm-icon-wrapper jellyfin">
@@ -88,7 +88,9 @@
           v-for="song in store.jellyfinMostPlayed"
           :key="song.id"
           class="daily-card hover-scale"
-          @click="store.playSong(song)"
+          @click="!store.isMirror && store.playSong(song)"
+          :aria-disabled="store.isMirror"
+          :class="{ 'mirror-readonly': store.isMirror }"
         >
           <CoverArt :url="song.coverUrl" :size="120" :radius="10" :show-shadow="true" />
           <div class="daily-name">{{ song.name }}</div>
@@ -108,7 +110,9 @@
           v-for="song in store.jellyfinFavorites"
           :key="song.id"
           class="daily-card hover-scale"
-          @click="store.playSong(song)"
+          @click="!store.isMirror && store.playSong(song)"
+          :aria-disabled="store.isMirror"
+          :class="{ 'mirror-readonly': store.isMirror }"
         >
           <CoverArt :url="song.coverUrl" :size="120" :radius="10" :show-shadow="true" />
           <div class="daily-name">{{ song.name }}</div>
@@ -126,6 +130,7 @@
           :key="g.id"
           class="genre-chip"
           @click="store.playJellyfinGenre(g.id)"
+          :disabled="store.isMirror"
         >
           <Icon icon="mdi:music-note" />
           {{ g.name }}
@@ -144,7 +149,9 @@
           v-for="song in (store.dailySongs[dailySourceSafe] ?? []).slice(0, 12)"
           :key="song.id"
           class="daily-card hover-scale"
-          @click="store.playSong(song)"
+          @click="!store.isMirror && store.playSong(song)"
+          :aria-disabled="store.isMirror"
+          :class="{ 'mirror-readonly': store.isMirror }"
         >
           <CoverArt :url="song.coverUrl" :size="120" :radius="10" :show-shadow="true" />
           <div class="daily-name">{{ song.name }}</div>
@@ -233,7 +240,9 @@
           v-for="song in store.bilibiliPopular.slice(0, 12)"
           :key="song.id"
           class="daily-card hover-scale"
-          @click="store.playSong(song)"
+          @click="!store.isMirror && store.playSong(song)"
+          :aria-disabled="store.isMirror"
+          :class="{ 'mirror-readonly': store.isMirror }"
         >
           <CoverArt :url="song.coverUrl" :size="120" :radius="10" :show-shadow="true" />
           <div class="daily-name">{{ song.name }}</div>
@@ -327,6 +336,7 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
+.mirror-readonly { cursor: default; }
 .search-bar {
   display: flex;
   align-items: center;

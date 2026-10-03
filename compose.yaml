@@ -5,6 +5,8 @@ services:
     build:
       context: .
       dockerfile: scripts/docker/Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-node:22-bookworm-slim}
     init: true
     restart: unless-stopped
     ports:

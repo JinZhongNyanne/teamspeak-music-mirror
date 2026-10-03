@@ -48,10 +48,10 @@
             <span class="queue-count">{{ q.songCount }} 首</span>
           </div>
           <div class="queue-actions">
-            <button class="btn-sm primary" :disabled="!activeBotId || busyId === q.id" @click="onLoad(q, 'replace')">
+            <button class="btn-sm primary" :disabled="store.isMirror || !activeBotId || busyId === q.id" @click="onLoad(q, 'replace')">
               加载
             </button>
-            <button class="btn-sm" :disabled="!activeBotId || busyId === q.id" @click="onLoad(q, 'append')">
+            <button class="btn-sm" :disabled="store.isMirror || !activeBotId || busyId === q.id" @click="onLoad(q, 'append')">
               追加
             </button>
             <button class="btn-sm danger" :disabled="busyId === q.id" @click="onDelete(q)">
@@ -81,7 +81,7 @@ const busyId = ref<number | null>(null);
 
 const activeBotId = computed(() => store.activeBotId);
 const activeBotName = computed(() => store.activeBot?.name ?? '（未选择）');
-const canSave = computed(() => !!activeBotId.value && newName.value.trim().length > 0);
+const canSave = computed(() => !store.isMirror && !!activeBotId.value && newName.value.trim().length > 0);
 
 async function onSave() {
   if (!canSave.value || saving.value) return;
@@ -100,7 +100,7 @@ async function onSave() {
 }
 
 async function onLoad(q: SavedQueueMeta, mode: 'replace' | 'append') {
-  if (!activeBotId.value) return;
+  if (store.isMirror || !activeBotId.value) return;
   busyId.value = q.id;
   try {
     const res = await load(q.id, activeBotId.value, mode);

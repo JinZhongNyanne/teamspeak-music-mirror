@@ -4,7 +4,7 @@
       <h3 class="queue-title">播放队列</h3>
       <span class="queue-count">{{ botQueue.length }} 首</span>
       <button
-        v-if="botQueue.length > 0 && (can('player.control') || guestCan('removeClear'))"
+        v-if="!store.isMirror && botQueue.length > 0 && (can('player.control') || guestCan('removeClear'))"
         class="clear-btn"
         @click="clearAndStop"
         title="清空队列并停止播放"
@@ -34,7 +34,7 @@
           <div class="queue-song-name">{{ song.name }}</div>
           <div class="queue-song-artist">{{ song.artist }}</div>
         </div>
-        <button v-if="can('player.queue') || guestCan('removeClear')" class="remove-btn" @click.stop="removeSong(i)" title="移除">
+        <button v-if="!store.isMirror && (can('player.queue') || guestCan('removeClear'))" class="remove-btn" @click.stop="removeSong(i)" title="移除">
           <Icon icon="mdi:close" />
         </button>
       </div>
@@ -68,7 +68,7 @@ watch(() => props.open, (isOpen) => {
 });
 
 async function playAtIndex(index: number) {
-  if (!can('player.control')) return;
+  if (store.isMirror || !can('player.control')) return;
   await store.playAtIndex(index);
   await store.fetchQueue();
 }
@@ -89,7 +89,7 @@ function onRowClick(e: MouseEvent, index: number) {
 }
 
 async function removeSong(index: number) {
-  if (!store.activeBotId) return;
+  if (store.isMirror || !store.activeBotId) return;
   try {
     await axios.delete(`/api/player/${store.activeBotId}/queue/${index + 1}`);
     await store.fetchQueue();

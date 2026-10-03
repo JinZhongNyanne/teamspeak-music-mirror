@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build each target architecture natively (or under QEMU), including native addons.
-FROM node:22-bookworm-slim AS builder
+ARG NODE_IMAGE=node:22-bookworm-slim
+FROM ${NODE_IMAGE} AS builder
 
 ENV FFMPEG_BIN=/usr/bin/ffmpeg
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,7 +19,7 @@ RUN npm run build \
     && npm run check:native \
     && npm cache clean --force
 
-FROM node:22-bookworm-slim AS downloader
+FROM ${NODE_IMAGE} AS downloader
 ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
@@ -26,7 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY scripts/docker/install-yt-dlp.sh /tmp/install-yt-dlp.sh
 RUN sh /tmp/install-yt-dlp.sh "$TARGETARCH" /usr/local/bin/yt-dlp
 
-FROM node:22-bookworm-slim AS runtime
+FROM ${NODE_IMAGE} AS runtime
 ENV NODE_ENV=production \
     FFMPEG_BIN=/usr/bin/ffmpeg
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -1,3 +1,4 @@
+import { botStatusForScope } from "../bot-status.js";
 import { Router } from "express";
 import type { BotManager } from "../../bot/manager.js";
 import type { BotDatabase } from "../../data/database.js";
@@ -255,7 +256,7 @@ export function createPlayerRouter(
 
   router.get("/:botId/queue", (req, res) => {
     const bot = (req as any).bot;
-    res.json({ queue: bot.getQueue(), status: bot.getStatus() });
+    res.json({ queue: bot.getQueue(), status: botStatusForScope(botManager, bot, req.user!.role === "admin" ? "all" : req.user!.bots) });
   });
 
   router.delete("/:botId/queue/:index", authorize({ capability: "player.queue", guestFlag: "removeClear" }), async (req, res) => {

@@ -187,6 +187,7 @@ export class BotInstance extends EventEmitter {
   private logger: Logger;
   private avatarStore: AvatarStore;
   private connected = false;
+  private connecting = false;
   /** Fences async work and timers from earlier TeamSpeak connections. */
   private lifecycleGeneration = 0;
   private occupancyRequest = 0;
@@ -648,7 +649,9 @@ export class BotInstance extends EventEmitter {
     this.lifecycleGeneration++;
     this._cancelIdleTimer();
     this.disconnectEmitted = false;
-    await this.tsClient.connect();
+    this.connecting = true;
+    try { await this.tsClient.connect(); }
+    finally { this.connecting = false; }
     const resolvedEndpoint = this.tsClient.getResolvedVoiceEndpoint();
     this.voiceServerScope = {
       host:
@@ -679,6 +682,7 @@ export class BotInstance extends EventEmitter {
   }
 
   disconnect(): void {
+    this.connecting = false;
     this.lifecycleGeneration++;
     this._cancelIdleTimer();
     this.voiceDucking.reset(true);
@@ -2233,14 +2237,14 @@ export class BotInstance extends EventEmitter {
   }
 
   /** Output-only instances retain their own identity, nickname and connection. */
-  setMirrorSource(source: () => BotStatus | undefined, queue?: () => QueuedSong[]): void {
-    if (!this.mirrorSource) {
+  setMirrorSource(source: (() => BotStatus | undefined) | null, queue?: () => QueuedSong[]): void {
+    if (source && !this.mirrorSource) {
       this.player.stop();
       this.spotifyController.stop();
       this._cancelIdleTimer();
     }
     this.mirrorSource = source;
-    this.mirrorQueue = queue ?? null;
+    this.mirrorQueue = source ? queue ?? null : null;
   }
 
   isMirrorTarget(): boolean { return this.mirrorSource !== null; }
@@ -2355,6 +2359,8 @@ export class BotInstance extends EventEmitter {
   getQueueManager(): PlayQueue {
     return this.queue;
   }
+
+  isConnectionActive(): boolean { return this.connected || this.connecting; }
 
   isConnected(): boolean {
     return this.connected;

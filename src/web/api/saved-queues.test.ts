@@ -16,10 +16,11 @@ const song = (id: string) => ({
   duration: 1,
 });
 
-function mount(enabled: boolean, opts: { queue?: unknown[] } = {}) {
+function mount(enabled: boolean, opts: { queue?: unknown[]; mirror?: boolean; scope?: string[] } = {}) {
   const db = createDatabase(":memory:");
   const loads: Array<{ songs: unknown[]; mode: string; by?: string }> = [];
   const bot = {
+    isMirrorTarget: () => opts.mirror ?? false,
     getQueueManager: () => ({ list: () => opts.queue ?? [song("a"), song("b")] }),
     loadSavedQueue: async (songs: unknown[], mode: string, by?: string) => {
       loads.push({ songs, mode, by });
@@ -29,7 +30,7 @@ function mount(enabled: boolean, opts: { queue?: unknown[] } = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as unknown as { user: unknown }).user = { id: "u1", username: "alice", role: "member" };
+    (req as unknown as { user: unknown }).user = { id: "u1", username: "alice", role: "member", capabilities: new Set(["player.queue"]), bots: opts.scope ? new Set(opts.scope) : "all" };
     next();
   });
   app.use(
@@ -40,6 +41,22 @@ function mount(enabled: boolean, opts: { queue?: unknown[] } = {}) {
 }
 
 describe("saved-queues router", () => {
+  it("rejects mirror save and load without altering a queue", async () => {
+    const { app, db, loads } = mount(true, { mirror: true });
+    const saved = db.saveQueue("u1", "night", [song("a")]);
+    expect((await request(app).post("/api/saved-queues").send({ botId: "b", name: "x" })).status).toBe(409);
+    expect((await request(app).post(`/api/saved-queues/${saved.id}/load`).send({ botId: "b" })).status).toBe(409);
+    expect(loads).toEqual([]);
+  });
+
+  it("checks the target bot scope when saving and loading", async () => {
+    const { app, db, loads } = mount(true, { scope: ["allowed"] });
+    const saved = db.saveQueue("u1", "night", [song("a")]);
+    expect((await request(app).post("/api/saved-queues").send({ botId: "private", name: "x" })).status).toBe(403);
+    expect((await request(app).post(`/api/saved-queues/${saved.id}/load`).send({ botId: "private" })).status).toBe(403);
+    expect(loads).toEqual([]);
+  });
+
   it("403s every route when the feature is disabled", async () => {
     const { app } = mount(false);
     expect((await request(app).get("/api/saved-queues")).status).toBe(403);

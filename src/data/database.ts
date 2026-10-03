@@ -74,6 +74,8 @@ export interface BotInstance {
   ts6ApiKey: string;
   /** Password to join the TS server (server password) */
   serverPassword: string;
+  /** Empty means independent playback; omission is accepted for older callers. */
+  mirrorSourceBotId?: string;
   identity?: string;
 }
 
@@ -178,6 +180,9 @@ function migrateSchema(db: Database.Database): void {
   if (!names.includes("channelId")) {
     db.exec("ALTER TABLE bot_instances ADD COLUMN channelId TEXT NOT NULL DEFAULT ''");
   }
+  if (!names.includes("mirrorSourceBotId")) {
+    db.exec("ALTER TABLE bot_instances ADD COLUMN mirrorSourceBotId TEXT NOT NULL DEFAULT ''");
+  }
   // Profile feature flags
   const profileCols = [
     "profile_avatar_enabled",
@@ -246,6 +251,7 @@ function initTables(db: Database.Database): void {
       serverProtocol TEXT NOT NULL DEFAULT '',
       ts6ApiKey TEXT NOT NULL DEFAULT '',
       serverPassword TEXT NOT NULL DEFAULT '',
+      mirrorSourceBotId TEXT NOT NULL DEFAULT '',
       volume INTEGER NOT NULL DEFAULT 75,
       play_mode TEXT NOT NULL DEFAULT 'seq',
       identity TEXT
@@ -414,8 +420,8 @@ export function createDatabase(dbPath: string): BotDatabase {
   `);
 
   const upsertInstance = db.prepare(`
-    INSERT INTO bot_instances (id, name, serverAddress, serverPort, nickname, defaultChannel, channelId, channelPassword, autoStart, serverProtocol, ts6ApiKey, serverPassword, identity)
-    VALUES (@id, @name, @serverAddress, @serverPort, @nickname, @defaultChannel, @channelId, @channelPassword, @autoStart, @serverProtocol, @ts6ApiKey, @serverPassword, @identity)
+    INSERT INTO bot_instances (id, name, serverAddress, serverPort, nickname, defaultChannel, channelId, channelPassword, autoStart, serverProtocol, ts6ApiKey, serverPassword, mirrorSourceBotId, identity)
+    VALUES (@id, @name, @serverAddress, @serverPort, @nickname, @defaultChannel, @channelId, @channelPassword, @autoStart, @serverProtocol, @ts6ApiKey, @serverPassword, @mirrorSourceBotId, @identity)
     ON CONFLICT(id) DO UPDATE SET
       name = excluded.name,
       serverAddress = excluded.serverAddress,
@@ -428,6 +434,7 @@ export function createDatabase(dbPath: string): BotDatabase {
       serverProtocol = excluded.serverProtocol,
       ts6ApiKey = excluded.ts6ApiKey,
       serverPassword = excluded.serverPassword,
+      mirrorSourceBotId = excluded.mirrorSourceBotId,
       identity = excluded.identity
   `);
 
@@ -567,6 +574,7 @@ export function createDatabase(dbPath: string): BotDatabase {
       upsertInstance.run({
         ...instance,
         autoStart: instance.autoStart ? 1 : 0,
+        mirrorSourceBotId: instance.mirrorSourceBotId ?? "",
         identity: instance.identity ?? null,
       });
     },
@@ -582,6 +590,7 @@ export function createDatabase(dbPath: string): BotDatabase {
         ts6ApiKey: r.ts6ApiKey ?? "",
         serverPassword: r.serverPassword ?? "",
         channelId: r.channelId ?? "",
+        mirrorSourceBotId: r.mirrorSourceBotId ?? "",
         identity: r.identity ?? undefined,
       }));
     },

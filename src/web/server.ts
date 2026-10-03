@@ -35,7 +35,7 @@ import { setupWebSocket } from "./websocket.js";
 import { createUserStore } from "../data/users.js";
 import { createSessionStore } from "../data/sessions.js";
 import { createApiKeyStore } from "../data/api-keys.js";
-import { createPermissionStore } from "../data/permissions.js";
+import { createPermissionStore, resolvePermissionContext } from "../data/permissions.js";
 import { createRequireAuth } from "./middleware/requireAuth.js";
 import { requireAdmin } from "./middleware/requireAdmin.js";
 import { requireNotGuest } from "./middleware/requireNotGuest.js";
@@ -288,7 +288,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
     const botScope: "all" | Set<string> =
       result.role === "guest"
         ? guestBots === "all" ? "all" : new Set(guestBots)
-        : "all";
+        : resolvePermissionContext(result.role, result.userId, permissions).bots;
     wss.handleUpgrade(req, socket, head, (ws) => {
       const w = ws as unknown as { userId: string; isGuest: boolean; botScope: "all" | Set<string> };
       w.userId = result.userId;

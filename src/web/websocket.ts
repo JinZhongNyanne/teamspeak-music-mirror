@@ -1,4 +1,5 @@
 import { WebSocketServer, WebSocket } from "ws";
+import { botStatusForScope } from "./bot-status.js";
 import type { BotManager } from "../bot/manager.js";
 import type { BotInstance } from "../bot/instance.js";
 import type { Logger } from "../logger.js";
@@ -27,7 +28,7 @@ export function setupWebSocket(
    */
   function visibleToClient(ws: WebSocket, botId: string): boolean {
     const w = ws as unknown as { isGuest?: boolean; botScope?: "all" | Set<string> };
-    if (!w.isGuest || w.botScope === "all" || !w.botScope) return true;
+    if (w.botScope === "all" || !w.botScope) return true;
     return w.botScope.has(botId);
   }
 
@@ -46,7 +47,7 @@ export function setupWebSocket(
     const bots = botManager
       .getAllBots()
       .filter((b) => visibleToClient(ws, b.id))
-      .map((b) => b.getStatus());
+      .map((b) => botStatusForScope(botManager, b, (ws as unknown as { botScope?: "all" | Set<string> }).botScope ?? "all"));
     ws.send(JSON.stringify({ type: "init", bots }));
 
     ws.on("close", () => {
@@ -61,12 +62,15 @@ export function setupWebSocket(
   });
 
   const broadcast = (data: object, botId?: string) => {
-    const message = JSON.stringify(data);
     for (const client of clients) {
       if (client.readyState !== WebSocket.OPEN) continue;
       if (botId !== undefined && !visibleToClient(client, botId)) continue;
       try {
-        client.send(message);
+        const bot = botId === undefined ? undefined : botManager.getBot?.(botId);
+        const message = bot && "status" in data
+          ? { ...data, status: botStatusForScope(botManager, bot, (client as unknown as { botScope?: "all" | Set<string> }).botScope ?? "all") }
+          : data;
+        client.send(JSON.stringify(message));
       } catch {
         clients.delete(client);
       }

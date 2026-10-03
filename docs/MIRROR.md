@@ -4,6 +4,8 @@ source 和 target 是本应用管理的两个 TeamSpeak 客户端。source 保�
 
 ## 配置
 
+推荐在 WebUI 的设置 → 机器人管理中选择「镜像机器人」方案，选择原实例和固定目标频道。关系保存在数据库，支持一台原机器人对应多个镜像；操作步骤、状态、权限和限制以 [README](../README.md) 为准。下列文件/环境方式为兼容旧部署或由运维锁定关系的高级配置，指定目标在网页中只读。
+
 先在 WebUI 创建或确认两个机器人并取得 ID。两者应连接同一语音服务器，保存各自独立身份。target 必须配置数字 `channelId`，并开启 `autoStart`，保证应用重启后重新连接。
 
 将 [示例文件](../examples/mirror.json) 复制到持久化目录 `/app/data/mirror.json`：

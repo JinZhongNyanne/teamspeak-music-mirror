@@ -69,7 +69,7 @@ const { can, guestCan } = useSession();
 
 // "Play all" loads + plays the whole collection (clears the queue). Members
 // need player.control; guests need the playCollection flag (issue #103).
-const canPlayAll = computed(() => can('player.control') || guestCan('playCollection'));
+const canPlayAll = computed(() => !store.isMirror && (can('player.control') || guestCan('playCollection')));
 
 import { Song } from '../stores/player.js';
 

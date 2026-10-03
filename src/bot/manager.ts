@@ -8,7 +8,7 @@ import {
 } from "./instance.js";
 import type { MusicProvider } from "../music/provider.js";
 import { YouTubeProvider } from "../music/youtube.js";
-import type { BotDatabase } from "../data/database.js";
+import type { BotDatabase, BotInstance as SavedBot } from "../data/database.js";
 import { saveConfig, type BotConfig } from "../data/config.js";
 import type { Logger } from "../logger.js";
 
@@ -16,7 +16,7 @@ import type { ServerProtocol } from "../ts-protocol/client.js";
 import type { AvatarStore } from "../data/avatars.js";
 import type { PermissionStore } from "../data/permissions.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
-import { ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
+import { normalizeManagedVoiceHost, ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
 
 /**
  * Run bot.connect() with a hard deadline. If the handshake hangs (e.g. the
@@ -54,6 +54,13 @@ async function connectWithTimeout(
   }
 }
 
+export class MirrorConfigurationError extends Error {
+  constructor(message: string, readonly statusCode = 400) {
+    super(message);
+    this.name = "MirrorConfigurationError";
+  }
+}
+
 export interface CreateBotParams {
   name: string;
   serverAddress: string;
@@ -70,6 +77,8 @@ export interface CreateBotParams {
   ts6ApiKey?: string;
   /** Password required to join the TS server. */
   serverPassword?: string;
+  /** Empty selects independent music playback. */
+  mirrorSourceBotId?: string;
 }
 
 export class BotManager extends EventEmitter {
@@ -92,7 +101,7 @@ export class BotManager extends EventEmitter {
   private permissions: PermissionStore;
   private configPath: string;
   private readonly mirror: MirrorConfig | null;
-  private readonly mirrorRelay = new MirrorRelay();
+  private readonly mirrorRelays = new Map<string, MirrorRelay>();
 
   constructor(
     neteaseProvider: MusicProvider,
@@ -139,6 +148,15 @@ export class BotManager extends EventEmitter {
 
   async createBot(params: CreateBotParams): Promise<BotInstance> {
     const id = crypto.randomUUID();
+    const saved: SavedBot = {
+      id, name: params.name, serverAddress: params.serverAddress,
+      serverPort: params.serverPort, nickname: params.nickname,
+      defaultChannel: params.defaultChannel ?? "", channelId: params.channelId ?? "",
+      channelPassword: params.channelPassword ?? "", autoStart: params.autoStart ?? false,
+      serverProtocol: params.serverProtocol ?? "", ts6ApiKey: params.ts6ApiKey ?? "",
+      serverPassword: params.serverPassword ?? "", mirrorSourceBotId: params.mirrorSourceBotId?.trim() ?? "",
+    };
+    this.validateMirrorBots([...this.database.getBotInstances(), saved]);
 
     const bot = new BotInstance({
       id,
@@ -172,37 +190,26 @@ export class BotManager extends EventEmitter {
       spotifyOAuth: this.spotifyOAuth,
     });
 
+    this.database.saveBotInstance(saved);
     this.bots.set(id, bot);
     this.rewireMirror();
     this.emit("botInstance", bot);
-
-    this.database.saveBotInstance({
-      id,
-      name: params.name,
-      serverAddress: params.serverAddress,
-      serverPort: params.serverPort,
-      nickname: params.nickname,
-      defaultChannel: params.defaultChannel ?? "",
-      channelId: params.channelId ?? "",
-      channelPassword: params.channelPassword ?? "",
-      autoStart: params.autoStart ?? false,
-      serverProtocol: params.serverProtocol ?? "",
-      ts6ApiKey: params.ts6ApiKey ?? "",
-      serverPassword: params.serverPassword ?? "",
-    });
 
     this.logger.info({ botId: id, name: params.name }, "Bot instance created");
     return bot;
   }
 
   async removeBot(id: string): Promise<void> {
+    const dependents = this.database.getBotInstances().filter((bot) => this.sourceId(bot) === id);
+    if (dependents.length) throw new MirrorConfigurationError(`该机器人被 ${dependents.length} 个镜像使用，请先解除镜像关联再删除。`, 409);
+    if (id === this.mirror?.targetBotId) throw new MirrorConfigurationError("Mirror configuration is locked by environment/file settings; remove that binding first", 409);
     const bot = this.bots.get(id);
     if (bot) {
       bot.disconnect();
       this.bots.delete(id);
-      this.rewireMirror();
     }
     this.database.deleteBotInstance(id);
+    this.rewireMirror();
     this.permissions.pruneBot(id);
     // Prune the deleted bot from the guest scope allow-list (mirrors permissions.pruneBot).
     if (Array.isArray(this.config.guestMode.bots) && this.config.guestMode.bots.includes(id)) {
@@ -214,15 +221,10 @@ export class BotManager extends EventEmitter {
   }
 
   updateBot(id: string, params: Partial<CreateBotParams>): void {
-    if (id === this.mirror?.targetBotId &&
-        ["serverAddress", "serverPort", "defaultChannel", "channelId", "channelPassword"].some((key) => key in params)) {
-      throw new Error("Mirror output channel is fixed; edit its saved configuration while stopped");
-    }
     const instances = this.database.getBotInstances();
-    const existing = instances.find((i) => i.id === id);
+    const existing = instances.find((bot) => bot.id === id);
     if (!existing) throw new Error(`Bot ${id} not found`);
-
-    this.database.saveBotInstance({
+    const next: SavedBot = {
       ...existing,
       name: params.name ?? existing.name,
       serverAddress: params.serverAddress ?? existing.serverAddress,
@@ -234,17 +236,53 @@ export class BotManager extends EventEmitter {
       serverProtocol: params.serverProtocol ?? existing.serverProtocol,
       ts6ApiKey: params.ts6ApiKey ?? existing.ts6ApiKey,
       serverPassword: params.serverPassword ?? existing.serverPassword,
-    });
-    // Update in-memory name immediately (other fields need reconnect)
-    const bot = this.bots.get(id);
-    if (bot && params.name) {
-      bot.name = params.name;
+      autoStart: params.autoStart ?? existing.autoStart,
+      mirrorSourceBotId: params.mirrorSourceBotId?.trim() ?? existing.mirrorSourceBotId ?? "",
+    };
+    const connectionKeys = ["serverAddress", "serverPort", "nickname", "defaultChannel", "channelId", "channelPassword", "serverProtocol", "ts6ApiKey", "serverPassword"] as const;
+    const connectionChanged = connectionKeys.some((key) => next[key] !== existing[key]);
+    const modeChanged = this.sourceId(existing) !== (params.mirrorSourceBotId === undefined ? this.sourceId(existing) : next.mirrorSourceBotId);
+    if (id === this.mirror?.targetBotId && (connectionChanged || modeChanged)) {
+      throw new MirrorConfigurationError("Mirror configuration is locked by environment/file settings; edit that binding first", 409);
     }
-    this.logger.info({ botId: id }, "Bot instance config updated (connection changes need restart)");
+    const bot = this.bots.get(id);
+    if (bot?.isConnectionActive() && (connectionChanged || modeChanged)) {
+      throw new MirrorConfigurationError("Stop the bot before changing its connection or mirror scheme", 409);
+    }
+    this.validateMirrorBots(instances.map((saved) => saved.id === id ? next : saved));
+    this.database.saveBotInstance(next);
+    if (bot) bot.name = next.name;
+    // startBot reconstructs the TeamSpeak client using the updated saved channel.
+    this.rewireMirror();
+    bot?.emit("stateChange");
+    this.logger.info({ botId: id }, "Bot instance config updated");
   }
 
-  getBotConfig(id: string): import("../data/database.js").BotInstance | undefined {
-    return this.database.getBotInstances().find((i) => i.id === id);
+  getBotConfig(id: string): (SavedBot & { mirrorConfigLocked: boolean }) | undefined {
+    const saved = this.database.getBotInstances().find((bot) => bot.id === id);
+    return saved ? { ...saved, mirrorSourceBotId: this.sourceId(saved), mirrorConfigLocked: id === this.mirror?.targetBotId } : undefined;
+  }
+
+  getBotMirrorInfo(id: string): {
+    mode: "music" | "mirror";
+    mirrorSourceBotId: string;
+    mirrorSourceName: string;
+    mirrorState: "source-offline" | "output-offline" | "syncing" | "idle";
+    mirrorConfigLocked: boolean;
+    fixedChannelId: string;
+  } {
+    const saved = this.database.getBotInstances().find((bot) => bot.id === id);
+    const sourceId = saved ? this.sourceId(saved) : "";
+    const source = sourceId ? this.bots.get(sourceId) : undefined;
+    const output = this.bots.get(id);
+    return {
+      mode: sourceId ? "mirror" : "music",
+      mirrorSourceBotId: sourceId,
+      mirrorSourceName: source?.name ?? this.database.getBotInstances().find((bot) => bot.id === sourceId)?.name ?? "",
+      mirrorState: !sourceId ? "idle" : !source?.isConnected() ? "source-offline" : !output?.isConnected() ? "output-offline" : source.getStatus().playing ? "syncing" : "idle",
+      mirrorConfigLocked: id === this.mirror?.targetBotId,
+      fixedChannelId: sourceId ? saved?.channelId ?? "" : "",
+    };
   }
 
   getBot(id: string): BotInstance | undefined {
@@ -270,6 +308,8 @@ export class BotManager extends EventEmitter {
   async startBot(id: string): Promise<void> {
     const oldBot = this.bots.get(id);
     if (!oldBot) throw new Error(`Bot ${id} not found`);
+
+    this.validateMirrorBots(this.database.getBotInstances());
 
     // Always tear down the outgoing instance before creating a replacement.
     // Covers three cases:
@@ -348,14 +388,7 @@ export class BotManager extends EventEmitter {
 
   async loadSavedBots(): Promise<void> {
     const savedInstances = this.database.getBotInstances();
-    if (this.mirror) {
-      const source = savedInstances.find((bot) => bot.id === this.mirror!.sourceBotId);
-      const target = savedInstances.find((bot) => bot.id === this.mirror!.targetBotId);
-      if (!source || !target || !target.channelId || !/^[1-9]\d*$/.test(target.channelId) ||
-          source.serverAddress !== target.serverAddress || source.serverPort !== target.serverPort) {
-        throw new Error("Mirror configuration requires existing bots on the same server and a fixed target channelId");
-      }
-    }
+    this.validateMirrorBots(savedInstances);
     for (const saved of savedInstances) {
       const proto = saved.serverProtocol as "ts3" | "ts6" | "" | undefined;
       const bot = new BotInstance({
@@ -392,9 +425,11 @@ export class BotManager extends EventEmitter {
       });
 
       this.bots.set(saved.id, bot);
-      this.rewireMirror();
+    }
+    this.rewireMirror();
+    for (const saved of savedInstances) {
+      const bot = this.bots.get(saved.id)!;
       this.emit("botInstance", bot);
-
       // Only auto-connect bots that have autoStart enabled
       if (saved.autoStart) {
         bot.connect().then(() => {
@@ -434,13 +469,62 @@ export class BotManager extends EventEmitter {
     }
   }
 
+  private sourceId(bot: SavedBot): string {
+    return bot.id === this.mirror?.targetBotId ? this.mirror.sourceBotId : bot.mirrorSourceBotId?.trim() ?? "";
+  }
+
+  private validateMirrorBots(bots: SavedBot[]): void {
+    const byId = new Map(bots.map((bot) => [bot.id, bot]));
+    if (this.mirror && (!byId.has(this.mirror.sourceBotId) || !byId.has(this.mirror.targetBotId))) {
+      throw new MirrorConfigurationError("Mirror configuration requires existing source and output bots");
+    }
+    for (const target of bots) {
+      const sourceId = this.sourceId(target);
+      if (!sourceId) continue;
+      if (sourceId === target.id) throw new MirrorConfigurationError("A bot cannot mirror itself");
+      const source = byId.get(sourceId);
+      if (!source) throw new MirrorConfigurationError(`Mirror source bot ${sourceId} does not exist`);
+      if (this.sourceId(source)) throw new MirrorConfigurationError("Mirror chains and cycles are not allowed; choose an independent music bot as source");
+      if (!/^[1-9]\d*$/.test(target.channelId)) throw new MirrorConfigurationError("Mirror output requires a fixed positive channelId");
+      if (normalizeManagedVoiceHost(source.serverAddress) !== normalizeManagedVoiceHost(target.serverAddress) || source.serverPort !== target.serverPort) {
+        throw new MirrorConfigurationError("Mirror source and output must use the same TeamSpeak server address and voice port");
+      }
+    }
+  }
+
   private rewireMirror(): void {
-    if (!this.mirror) return;
-    this.mirrorRelay.bind(this.bots.get(this.mirror.sourceBotId), this.bots.get(this.mirror.targetBotId));
+    for (const relay of this.mirrorRelays.values()) relay.dispose();
+    this.mirrorRelays.clear();
+    const saved = this.database.getBotInstances();
+    const byId = new Map(saved.map((bot) => [bot.id, bot]));
+    const outputs = new Map<string, BotInstance[]>();
+    for (const [id, bot] of this.bots) {
+      bot.setMirrorAudience(null);
+      const config = byId.get(id);
+      if (!config || !this.sourceId(config)) bot.setMirrorSource(null);
+    }
+    for (const config of saved) {
+      const sourceId = this.sourceId(config);
+      if (!sourceId) continue;
+      const target = this.bots.get(config.id);
+      const source = this.bots.get(sourceId);
+      const relay = new MirrorRelay(false);
+      relay.bind(source, target);
+      this.mirrorRelays.set(config.id, relay);
+      if (target) outputs.set(sourceId, [...outputs.get(sourceId) ?? [], target]);
+    }
+    for (const [sourceId, targets] of outputs) {
+      this.bots.get(sourceId)?.setMirrorAudience(async () => {
+        const audiences = await Promise.all(targets.map((target) => target.getMirrorAudienceIds()));
+        if (audiences.some((audience) => audience === null)) return null;
+        return new Set(audiences.flatMap((audience) => [...audience!]));
+      });
+    }
   }
 
   shutdown(): void {
-    this.mirrorRelay.dispose();
+    for (const relay of this.mirrorRelays.values()) relay.dispose();
+    this.mirrorRelays.clear();
     for (const bot of this.bots.values()) {
       bot.disconnect();
     }
