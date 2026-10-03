@@ -40,6 +40,8 @@ export interface QueueStateRow {
   mode: string;
   isFmMode: boolean;
   fmPlatform: string;
+  /** Manual pause only; older callers default to unpaused. */
+  paused?: boolean;
 }
 
 export interface PlayHistoryEntry {
@@ -221,6 +223,11 @@ function migrateSchema(db: Database.Database): void {
   if (!historyColNames.includes("requestedBy")) {
     db.exec("ALTER TABLE play_history ADD COLUMN requestedBy TEXT NOT NULL DEFAULT ''");
   }
+
+  const queueColumns = db.prepare("PRAGMA table_info(queue_state)").all() as Array<{ name: string }>;
+  if (!queueColumns.some((column) => column.name === "paused")) {
+    db.exec("ALTER TABLE queue_state ADD COLUMN paused INTEGER NOT NULL DEFAULT 0");
+  }
 }
 
 function initTables(db: Database.Database): void {
@@ -348,6 +355,7 @@ function initTables(db: Database.Database): void {
       mode         TEXT NOT NULL,
       isFmMode     INTEGER NOT NULL DEFAULT 0,
       fmPlatform   TEXT NOT NULL DEFAULT '',
+      paused       INTEGER NOT NULL DEFAULT 0,
       updatedAt    TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -546,14 +554,15 @@ export function createDatabase(dbPath: string): BotDatabase {
   const deleteSavedQueueById = db.prepare("DELETE FROM saved_queues WHERE id = ?");
 
   const upsertQueueState = db.prepare(`
-    INSERT INTO queue_state (botId, songs, currentIndex, mode, isFmMode, fmPlatform, updatedAt)
-    VALUES (@botId, @songs, @currentIndex, @mode, @isFmMode, @fmPlatform, datetime('now'))
+    INSERT INTO queue_state (botId, songs, currentIndex, mode, isFmMode, fmPlatform, paused, updatedAt)
+    VALUES (@botId, @songs, @currentIndex, @mode, @isFmMode, @fmPlatform, @paused, datetime('now'))
     ON CONFLICT(botId) DO UPDATE SET
       songs = excluded.songs,
       currentIndex = excluded.currentIndex,
       mode = excluded.mode,
       isFmMode = excluded.isFmMode,
       fmPlatform = excluded.fmPlatform,
+      paused = excluded.paused,
       updatedAt = datetime('now')
   `);
   const selectQueueState = db.prepare("SELECT * FROM queue_state WHERE botId = ?");
@@ -751,12 +760,13 @@ export function createDatabase(dbPath: string): BotDatabase {
         mode: state.mode,
         isFmMode: state.isFmMode ? 1 : 0,
         fmPlatform: state.fmPlatform,
+        paused: state.paused ? 1 : 0,
       });
     },
 
     getQueueState(botId) {
       const r = selectQueueState.get(botId) as
-        | { botId: string; songs: string; currentIndex: number; mode: string; isFmMode: number; fmPlatform: string }
+        | { botId: string; songs: string; currentIndex: number; mode: string; isFmMode: number; fmPlatform: string; paused: number }
         | undefined;
       if (!r) return null;
       return {
@@ -766,6 +776,7 @@ export function createDatabase(dbPath: string): BotDatabase {
         mode: r.mode,
         isFmMode: r.isFmMode === 1,
         fmPlatform: r.fmPlatform,
+        paused: r.paused === 1,
       };
     },
 

@@ -298,6 +298,47 @@ describe("database", () => {
   });
 
   describe("queue_state", () => {
+    it("round-trips manual pause and defaults omitted pause to false on insert and update", () => {
+      const state = { botId: "paused-bot", songs: [sq("a")], currentIndex: 0, mode: "seq", isFmMode: false, fmPlatform: "" };
+      botDb.saveQueueState(state);
+      expect(botDb.getQueueState(state.botId)).toEqual({ ...state, paused: false });
+      botDb.saveQueueState({ ...state, paused: true });
+      expect(botDb.getQueueState(state.botId)).toEqual({ ...state, paused: true });
+      expect(botDb.db.prepare("SELECT paused FROM queue_state WHERE botId=?").get(state.botId)).toEqual({ paused: 1 });
+      botDb.saveQueueState({ ...state, paused: false });
+      expect(botDb.getQueueState(state.botId)?.paused).toBe(false);
+      botDb.saveQueueState({ ...state, paused: true });
+      botDb.saveQueueState(state);
+      expect(botDb.getQueueState(state.botId)?.paused).toBe(false);
+    });
+
+    it("migrates legacy snapshots without losing state and persists pause across reopen", () => {
+      const dir = mkdtempSync(join(tmpdir(), "queue-pause-migration-"));
+      const filename = join(dir, "queue.db");
+      let db = createDatabase(filename);
+      const state = { botId: "legacy", songs: [sq("a"), sq("b")], currentIndex: 1, mode: "loop", isFmMode: true, fmPlatform: "qq" };
+      try {
+        db.saveQueueState(state);
+        db.db.exec("ALTER TABLE queue_state DROP COLUMN paused");
+        db.close();
+        db = createDatabase(filename);
+        const columns = db.db.prepare("PRAGMA table_info(queue_state)").all() as Array<{ name: string; notnull: number; dflt_value: string }>;
+        expect(columns.find((column) => column.name === "paused")).toMatchObject({ notnull: 1, dflt_value: "0" });
+        expect(db.getQueueState(state.botId)).toEqual({ ...state, paused: false });
+        db.saveQueueState({ ...state, paused: true });
+        db.close();
+        db = createDatabase(filename);
+        expect(db.getQueueState(state.botId)).toEqual({ ...state, paused: true });
+        db.saveQueueState({ ...state, paused: false });
+        db.close();
+        db = createDatabase(filename);
+        expect(db.getQueueState(state.botId)).toEqual({ ...state, paused: false });
+      } finally {
+        db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     it("upserts, reads back, and clears per bot", () => {
       botDb.saveQueueState({ botId: "b1", songs: [sq("a")], currentIndex: 0, mode: "loop", isFmMode: true, fmPlatform: "netease" });
       botDb.saveQueueState({ botId: "b1", songs: [sq("a"), sq("b")], currentIndex: 1, mode: "seq", isFmMode: false, fmPlatform: "" });
@@ -306,6 +347,7 @@ describe("database", () => {
       expect(st.currentIndex).toBe(1);
       expect(st.mode).toBe("seq");
       expect(st.isFmMode).toBe(false);
+      expect(st.paused).toBe(false);
       botDb.clearQueueState("b1");
       expect(botDb.getQueueState("b1")).toBeNull();
     });

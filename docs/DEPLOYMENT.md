@@ -87,7 +87,7 @@ services:
 
 替换所有占位值，端口按实际情况调整，随后安装。若不需要媒体挂载，删除对应行。服务器地址、密码和机器人身份在 WebUI 或 data 卷内配置，不提交到公开仓库。
 
-首次安装：访问 WebUI 创建管理员和两个机器人，取得 ID。target 设置数字 `channelId` 和 `autoStart`，按 [镜像说明](MIRROR.md) 配置文件或成对环境变量及 TeamSpeak 权限，再重启应用。
+首次安装：访问 WebUI 创建管理员和独立播放机器人，再新建机器人并选择「镜像机器人」方案，选择原机器人、填写固定数字 `channelId`，启用 `autoStart` 并启动。按 [镜像说明](MIRROR.md) 设置 TeamSpeak 权限；使用网页方案不需要手写绑定文件或重启整个应用。
 
 ## 从旧 music-bot 整体迁移
 

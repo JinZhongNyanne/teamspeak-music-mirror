@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { BotInstance, COMMAND_DENIED_MESSAGE, spotifyPortsForBotId } from "./instance.js";
 import type { BotInstanceOptions } from "./instance.js";
 import { PlayQueue, PlayMode } from "../audio/queue.js";
@@ -395,6 +396,7 @@ describe("BotInstance.getProviderFor — spotify routing", () => {
 const resolveAndPlay = BotInstance.prototype.resolveAndPlay as (
   this: unknown,
   song: any,
+  startPaused?: boolean,
 ) => Promise<boolean>;
 const setupPlayerEvents = (BotInstance.prototype as any).setupPlayerEvents as (
   this: unknown,
@@ -734,6 +736,7 @@ describe("BotInstance transport delegation — spotify current song", () => {
       logger: { warn: vi.fn() },
       emit: vi.fn(),
       autoPaused: true,
+      persistQueueSnapshot: vi.fn(),
       currentSourceIsSpotify: true,
       sweepLocalAudio: vi.fn(),
       disableFmMode: vi.fn(),
@@ -1794,6 +1797,7 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
       replace: () => { current = { ...song, id: "replacement" }; player.sessionId++; player.state = "playing"; },
       stop: () => { current = null; player.sessionId++; player.state = "idle"; },
       restartSameSong: () => { player.sessionId++; player.state = "idle"; },
+      persistQueueSnapshot: vi.fn(),
       pause: () => cmdPause.call(ctx),
       resume: () => cmdResume.call(ctx),
       advances,
@@ -1946,5 +1950,208 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     lookup.reject(new Error("temporary lookup failure"));
     await flushEvents();
     expect(ctx.advances).toEqual([]);
+  });
+});
+
+describe("manual pause persistence and restoration", () => {
+  const databases: BotDatabase[] = [];
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    for (const db of databases.splice(0)) db.close();
+  });
+
+  function context(paused = true, platform: "netease" | "spotify" = "netease") {
+    const db = createDatabase(":memory:");databases.push(db);
+    const song = { ...song119("saved"), platform, duration: 200 };
+    db.saveQueueState({ botId: "bot1", songs: [song], currentIndex: 0, mode: "seq", isFmMode: false, fmPlatform: "", paused });
+    const player = Object.assign(makePlayer(), { resetFailures: vi.fn(), getPlaybackSessionId: () => 1, getVolume: () => 75, getElapsed: () => 0 });
+    const controller = makeController();
+    const ctx = makeResolveCtx({ player, controller, url: platform === "spotify" ? "spotify:track:saved" : "https://audio.test/saved.mp3" });
+    Object.assign(ctx, {
+      config: { savedQueuesEnabled: true }, queue: new PlayQueue(), database: db,
+      lifecycleGeneration: 0, restoredPauseIntent: null, queueRestoreToken: null, queueRestoreResolving: false,
+      _cancelIdleTimer: vi.fn(), voiceDucking: { reset: vi.fn() },
+      sweepLocalAudio: vi.fn(), unregisterManagedVoiceClient: vi.fn(), isFmMode: false,
+    });
+    ctx.tsClient.disconnect = vi.fn();
+    ctx.resolveAndPlay = resolveAndPlay.bind(ctx);
+    ctx.persistQueueSnapshot = persistQueueSnapshot.bind(ctx);
+    ctx.getStatus = BotInstance.prototype.getStatus.bind(ctx);
+    return { ctx, db, player, controller, song };
+  }
+
+  it("writes pause/resume intent immediately and retains it on immediate disconnect", () => {
+    const { ctx, db, player, song } = context(false);
+    ctx.queue.add(song);ctx.queue.play();player.play("existing");
+    cmdPause.call(ctx);
+    expect(db.getQueueState("bot1")?.paused).toBe(true);
+    cmdResume.call(ctx);
+    expect(db.getQueueState("bot1")?.paused).toBe(false);
+    cmdPause.call(ctx);
+    BotInstance.prototype.disconnect.call(ctx);
+    expect(ctx.queue.size()).toBe(0);
+    expect(db.getQueueState("bot1")).toMatchObject({ paused: true, currentIndex: 0 });
+    BotInstance.prototype.disconnect.call(ctx);
+    expect(db.getQueueState("bot1")?.paused).toBe(true);
+  });
+
+  it("flushes the latest queue before an unexpected TeamSpeak disconnect clears it", () => {
+    const { ctx, db, player, song } = context(true);
+    ctx.queue.add(song);ctx.queue.add(song119("just-added"));ctx.queue.play();player.play("existing");
+    ctx.tsClient = new EventEmitter();
+    (BotInstance.prototype as any).setupTsEvents.call(ctx);
+    ctx.tsClient.emit("disconnected");
+    expect(ctx.queue.size()).toBe(0);
+    expect(db.getQueueState("bot1")).toMatchObject({ paused: false });
+    expect(db.getQueueState("bot1")?.songs.map(song => song.id)).toEqual(["saved", "just-added"]);
+  });
+
+  it("distinguishes automatic occupancy pauses and a current paused recovery", () => {
+    const { ctx, db, player, song } = context();
+    ctx.queue.add(song);ctx.queue.play();player.play("existing");player.pause();
+    ctx.autoPaused = true;persistQueueSnapshot.call(ctx);
+    expect(db.getQueueState("bot1")?.paused).toBe(false);
+    ctx.autoPaused = false;player.stop();
+    ctx.streamRecovery = { pauseRequested: true, song: ctx.queue.current(), generation: 0, session: 1 };
+    persistQueueSnapshot.call(ctx);
+    expect(db.getQueueState("bot1")?.paused).toBe(true);
+    ctx.streamRecovery.generation++;
+    persistQueueSnapshot.call(ctx);
+    expect(db.getQueueState("bot1")?.paused).toBe(false);
+  });
+
+  it("does not let mirror outputs write an independent queue snapshot", () => {
+    const { ctx, db, song } = context();
+    ctx.queue.add(song);ctx.queue.play();ctx.mirrorSource = () => undefined;
+    db.clearQueueState("bot1");persistQueueSnapshot.call(ctx);
+    expect(db.getQueueState("bot1")).toBeNull();
+  });
+
+  it("pauses URL playback before a slow profile update and retains queue/volume/history", async () => {
+    const { ctx, db, player } = context();
+    const entered = deferred(), profile = deferred();
+    ctx.syncProfileToSong.mockImplementation(() => { entered.resolve();return profile.promise; });
+    const restoring = restoreQueueFromSnapshot.call(ctx);
+    await entered.promise;
+    expect(player.getState()).toBe("paused");
+    expect(player.pause.mock.invocationCallOrder[0]).toBeLessThan(ctx.syncProfileToSong.mock.invocationCallOrder[0]);
+    expect(ctx.getStatus()).toMatchObject({ paused: true, playing: false, queueSize: 1, volume: 75 });
+    expect(db.getPlayHistory("bot1", 10)).toHaveLength(1);
+    profile.resolve();await restoring;
+  });
+
+  it("keeps a slow saved URL visibly/persistently paused but honors resume during lookup", async () => {
+    const { ctx, db, player } = context();
+    const url = deferred<{ url: string }>();
+    ctx.getProviderFor.mockReturnValue({ getSongUrl: () => url.promise });
+    const restoring = restoreQueueFromSnapshot.call(ctx);
+    expect(ctx.getStatus().paused).toBe(true);
+    persistQueueSnapshot.call(ctx);
+    expect(db.getQueueState("bot1")?.paused).toBe(true);
+    cmdResume.call(ctx);
+    expect(ctx.getStatus().paused).toBe(false);
+    expect(db.getQueueState("bot1")?.paused).toBe(false);
+    url.resolve({ url: "https://audio.test/saved.mp3" });await restoring;
+    expect(player.getState()).toBe("playing");
+    expect(player.pause).not.toHaveBeenCalled();
+  });
+
+  it("retains pause after URL failure and retries the saved track on explicit resume", async () => {
+    const { ctx, db, player } = context();
+    const provider = { getSongUrl: vi.fn().mockResolvedValueOnce(null).mockResolvedValue({ url: "https://audio.test/retry.mp3" }) };
+    ctx.getProviderFor.mockReturnValue(provider);
+    await restoreQueueFromSnapshot.call(ctx);
+    expect(ctx.getStatus().paused).toBe(true);
+    persistQueueSnapshot.call(ctx);
+    expect(db.getQueueState("bot1")?.paused).toBe(true);
+    cmdResume.call(ctx);
+    await vi.waitFor(() => expect(player.getState()).toBe("playing"));
+    expect(provider.getSongUrl).toHaveBeenCalledTimes(2);
+    expect(db.getQueueState("bot1")?.paused).toBe(false);
+  });
+
+  it("fences a pending saved lookup when disconnected, even if connection becomes true again", async () => {
+    const { ctx, db, player } = context();
+    const url = deferred<{ url: string }>();ctx.getProviderFor.mockReturnValue({ getSongUrl: () => url.promise });
+    const restoring = restoreQueueFromSnapshot.call(ctx);
+    BotInstance.prototype.disconnect.call(ctx);ctx.connected = true;
+    url.resolve({ url: "https://audio.test/stale.mp3" });await restoring;
+    expect(player.play).not.toHaveBeenCalled();
+    expect(db.getQueueState("bot1")?.paused).toBe(true);
+  });
+
+  it("does not let a pending saved lookup replace a newly selected track", async () => {
+    const { ctx, player } = context();
+    const url = deferred<{ url: string }>();
+    const provider = { getSongUrl: vi.fn().mockReturnValueOnce(url.promise).mockResolvedValue({ url: "https://audio.test/new.mp3" }) };
+    ctx.getProviderFor.mockReturnValue(provider);
+    const restoring = restoreQueueFromSnapshot.call(ctx);
+    const replacement = song119("replacement");ctx.queue.clear();ctx.queue.add(replacement);ctx.queue.play();
+    await resolveAndPlay.call(ctx, ctx.queue.current());
+    url.resolve({ url: "https://audio.test/stale.mp3" });await restoring;
+    expect(player.play).toHaveBeenCalledTimes(1);
+    expect(player.play).toHaveBeenCalledWith("https://audio.test/new.mp3", 0, 1);
+    expect(player.getState()).toBe("playing");
+  });
+
+  it("pauses a reused Spotify output immediately after resume and also pauses its sidecar", async () => {
+    const { ctx, player, controller } = context(true, "spotify");
+    player.playPcmStream(controller.getPcmStream());player.pause();
+    const entered = deferred(), profile = deferred();
+    ctx.syncProfileToSong.mockImplementation(() => { entered.resolve();return profile.promise; });
+    const restoring = restoreQueueFromSnapshot.call(ctx);await entered.promise;
+    expect(player.getState()).toBe("paused");
+    expect(controller.pause).toHaveBeenCalledOnce();
+    expect(player.pause.mock.invocationCallOrder.at(-1)).toBeGreaterThan(player.resume.mock.invocationCallOrder[0]);
+    profile.resolve();await restoring;
+  });
+
+  it("cannot finish a Spotify restore after disconnecting during sidecar pause", async () => {
+    const { ctx, db, controller } = context(true, "spotify");
+    const entered = deferred(), paused = deferred();
+    controller.pause.mockImplementation(() => { entered.resolve();return paused.promise; });
+    const restoring = restoreQueueFromSnapshot.call(ctx);
+    await entered.promise;
+    BotInstance.prototype.disconnect.call(ctx);
+    paused.resolve();await restoring;
+    expect(ctx.currentSourceIsSpotify).toBe(false);
+    expect(db.getPlayHistory("bot1", 10)).toHaveLength(0);
+    expect(ctx.syncProfileToSong).not.toHaveBeenCalled();
+    expect(db.getQueueState("bot1")?.paused).toBe(true);
+  });
+
+  it.each(["cmdStop", "cmdClear"])("%s clears a pending restored pause and prevents its lookup starting audio", async command => {
+    const { ctx, player } = context();
+    const url = deferred<{ url: string }>();
+    ctx.getProviderFor.mockReturnValue({ getSongUrl: () => url.promise });
+    ctx.profileManager = { onSongChange: vi.fn().mockResolvedValue(undefined) };
+    ctx.disableFmMode = vi.fn();
+    const restoring = restoreQueueFromSnapshot.call(ctx);
+    (BotInstance.prototype as any)[command].call(ctx);
+    expect(ctx.getStatus()).toMatchObject({ paused: false, queueSize: 0 });
+    url.resolve({ url: "https://audio.test/stale.mp3" });await restoring;
+    expect(player.play).not.toHaveBeenCalled();
+  });
+
+  it("emits no real Opus frames while paused Spotify restoration awaits profile I/O", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const { ctx, controller } = context(true, "spotify");
+    const player = new AudioPlayer(ctx.logger);
+    const pcm = new PassThrough(), frames = vi.fn();player.on("frame", frames);
+    ctx.player = player;controller.getPcmStream.mockReturnValue(pcm as any);
+    const entered = deferred(), profile = deferred();
+    ctx.syncProfileToSong.mockImplementation(() => { entered.resolve();return profile.promise; });
+    const restoring = restoreQueueFromSnapshot.call(ctx);
+    try {
+      await entered.promise;
+      pcm.write(Buffer.alloc(48000 * 2 * 2));
+      await vi.advanceTimersByTimeAsync(200);
+      expect(player.getState()).toBe("paused");
+      expect(frames).not.toHaveBeenCalled();
+      profile.resolve();await restoring;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(frames).not.toHaveBeenCalled();
+    } finally { profile.resolve();player.stop();pcm.destroy(); }
   });
 });

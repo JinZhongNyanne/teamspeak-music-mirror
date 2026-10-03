@@ -197,6 +197,10 @@ export class BotInstance extends EventEmitter {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private channelUserCount = 0;
   private autoPaused = false;
+  /** User pause intent while a saved track is resolving or could not resolve. */
+  private restoredPauseIntent: boolean | null = null;
+  private queueRestoreToken: symbol | null = null;
+  private queueRestoreResolving = false;
   /** True while the audible track is served by the Spotify sidecar (external
    *  PCM mode) — drives fence/handoff decisions in resolveAndPlay + cmdStop. */
   private currentSourceIsSpotify = false;
@@ -460,6 +464,12 @@ export class BotInstance extends EventEmitter {
     });
 
     this.tsClient.on("disconnected", () => {
+      if ((this.player.getState() !== "idle" || this.restoredPauseIntent !== null) && this.queue.size() > 0) {
+        this.persistQueueSnapshot();
+      }
+      this.restoredPauseIntent = null;
+      this.queueRestoreToken = null;
+      this.queueRestoreResolving = false;
       // Always reset local state — covers the case where connect() never
       // completed (hanging handshake → 60s library idle timeout) and
       // this.connected was never flipped to true. Previously this handler
@@ -683,6 +693,14 @@ export class BotInstance extends EventEmitter {
 
   disconnect(): void {
     this.connecting = false;
+    // Flush the current queue and user pause intent before teardown clears them.
+    // Already stopped instances must not overwrite their retained snapshot.
+    if ((this.player.getState() !== "idle" || this.restoredPauseIntent !== null) && this.queue.size() > 0) {
+      this.persistQueueSnapshot();
+    }
+    this.restoredPauseIntent = null;
+    this.queueRestoreToken = null;
+    this.queueRestoreResolving = false;
     this.lifecycleGeneration++;
     this._cancelIdleTimer();
     this.voiceDucking.reset(true);
@@ -1063,13 +1081,36 @@ export class BotInstance extends EventEmitter {
   }
 
   /** Resolve URL for a song and start playing it. Skips to next if URL fails. */
-  async resolveAndPlay(song: QueuedSong): Promise<boolean> {
+  async resolveAndPlay(song: QueuedSong, startPaused?: boolean): Promise<boolean> {
     assertIndependentPlayback(this.mirrorSource);
+    if (startPaused !== undefined) {
+      this.queueRestoreToken ??= Symbol("queue restoration");
+      this.restoredPauseIntent ??= startPaused;
+      this.queueRestoreResolving = true;
+    } else {
+      // A new play/skip command supersedes any saved-track URL lookup.
+      this.queueRestoreToken = null;
+      this.restoredPauseIntent = null;
+      this.queueRestoreResolving = false;
+    }
+    const restoreToken = startPaused !== undefined ? this.queueRestoreToken : null;
+    const generation = this.lifecycleGeneration;
+    const currentRestore = () => !restoreToken || (this.queueRestoreToken === restoreToken &&
+      this.lifecycleGeneration === generation && this.queue.current() === song);
+    const applyRestoredPause = () => {
+      if (restoreToken && this.restoredPauseIntent === true) this.player.pause();
+      if (restoreToken) {
+        this.restoredPauseIntent = null;
+        this.queueRestoreResolving = false;
+      }
+    };
     if (!this.connected) {
+      if (restoreToken) this.queueRestoreResolving = false;
       this.logger.warn({ songId: song.id, name: song.name }, "resolveAndPlay called on disconnected bot — skipping");
       return false;
     }
     if (song.platform === "local" && !this.isLocalAudioEnabled()) {
+      if (restoreToken) this.queueRestoreResolving = false;
       this.logger.warn({ songId: song.id, name: song.name }, "Local audio playback disabled — refusing track");
       return false;
     }
@@ -1097,7 +1138,7 @@ export class BotInstance extends EventEmitter {
       // during that window. Without this, we'd spawn ffmpeg on a
       // disconnected bot and land back in the same "connected=false but
       // playing=true" inconsistency that Bug C was about.
-      if (!this.connected) {
+      if (!this.connected || !currentRestore()) {
         this.logger.warn(
           { songId: song.id, name: song.name },
           "bot disconnected during URL resolve — aborting playback",
@@ -1110,6 +1151,7 @@ export class BotInstance extends EventEmitter {
       // fallback message + skip so the queue keeps moving.
       if (isSpotifyUri(result.url)) {
         const ready = await this.spotifyController.ensureStarted();
+        if (!this.connected || !currentRestore()) return false;
         if (!ready) {
           this.logger.info({ songId: song.id, name: song.name }, "Spotify backend unavailable — skipping");
           await this.tsClient.sendTextMessage(SPOTIFY_UNAVAILABLE_MESSAGE);
@@ -1121,6 +1163,7 @@ export class BotInstance extends EventEmitter {
         // sidecar failed the play (dead/errored backend): never attach the
         // player to a dead stream — send the same fallback and skip.
         const played = await this.spotifyController.playTrack(result.url);
+        if (!this.connected || !currentRestore()) return false;
         if (!played) {
           this.logger.info({ songId: song.id, name: song.name }, "Spotify playTrack failed — skipping");
           await this.tsClient.sendTextMessage(SPOTIFY_UNAVAILABLE_MESSAGE);
@@ -1139,6 +1182,7 @@ export class BotInstance extends EventEmitter {
         // frame counter is not reset, so player.getElapsed() over-reads for the
         // 2nd+ consecutive Spotify track. Cosmetic only — the authoritative
         // elapsed shown to users is status.track.position from the backend poll.
+        const pauseOnStart = restoreToken && this.restoredPauseIntent === true;
         if (!this.player.isExternalActive()) {
           this.player.playPcmStream(this.spotifyController.getPcmStream(), {
             // The sidecar PCM pipe is long-lived; per-track end arrives via the
@@ -1156,6 +1200,7 @@ export class BotInstance extends EventEmitter {
               this.currentSourceIsSpotify = false;
             },
           });
+          applyRestoredPause();
         } else {
           // External-stream-reuse path: the persistent PCM stream is still
           // attached (e.g. we arrived here via pause → skip-within-spotify,
@@ -1166,6 +1211,13 @@ export class BotInstance extends EventEmitter {
           // is a no-op on an already-playing player, so the normal (non-paused)
           // spotify→spotify handoff is unaffected.
           this.player.resume();
+          applyRestoredPause();
+        }
+        if (pauseOnStart) {
+          // Hold TeamSpeak output synchronously before this network await.
+          await this.spotifyController.pause().catch((err) =>
+            this.logger.warn({ err }, "Failed to pause restored Spotify sidecar"));
+          if (!this.connected || !currentRestore()) return false;
         }
         this.currentSourceIsSpotify = true;
         this.jellyfinReporter?.onStop();
@@ -1199,6 +1251,9 @@ export class BotInstance extends EventEmitter {
       // 试听片段用试听时长（让 player nearEnd 正确触发自动切歌）；完整曲回退 song.duration
       this.effectiveDuration = result.trialDuration ?? song.duration;
       this.player.play(result.url, 0, this.effectiveDuration);
+      // The frame loop runs on timers. Pause before yielding to profile I/O so
+      // restoring a manually paused queue can never emit a warm-up audio frame.
+      applyRestoredPause();
       // Jellyfin playback reporting: open a session for jellyfin tracks (the
       // reporter closes the previous one itself); close any open session when
       // playback moves to another source. Fire-and-forget — never blocks play.
@@ -1224,6 +1279,11 @@ export class BotInstance extends EventEmitter {
     } catch (err) {
       this.logger.error({ err, songId: song.id }, "Failed to resolve URL");
       return false;
+    } finally {
+      if (restoreToken && this.queueRestoreToken === restoreToken) {
+        this.queueRestoreResolving = false;
+        if (this.restoredPauseIntent === null) this.queueRestoreToken = null;
+      }
     }
   }
 
@@ -1553,6 +1613,7 @@ export class BotInstance extends EventEmitter {
   }
 
   private cmdPause(): string {
+    if (this.queueRestoreToken) this.restoredPauseIntent = true;
     const recovery = this.streamRecovery;
     if (recovery && recovery.song === this.queue.current() && this.player.getState() === "idle") {
       recovery.pauseRequested = true;
@@ -1564,11 +1625,16 @@ export class BotInstance extends EventEmitter {
     }
     // User-initiated pause — clear auto-pause so occupancy won't auto-resume it.
     this.autoPaused = false;
+    this.persistQueueSnapshot();
     this.emit("stateChange");
     return "Paused";
   }
 
   private cmdResume(): string {
+    const retryRestore = this.queueRestoreToken && !this.queueRestoreResolving &&
+      this.player.getState() === "idle" && this.queue.current();
+    if (this.queueRestoreToken) this.restoredPauseIntent = false;
+    if (retryRestore) void this.resolveAndPlay(retryRestore, false);
     const recovery = this.streamRecovery;
     const retryInterrupted = recovery && recovery.song === this.queue.current() &&
       recovery.session === this.player.getPlaybackSessionId() && !recovery.inFlight &&
@@ -1584,11 +1650,15 @@ export class BotInstance extends EventEmitter {
     }
     // User-initiated resume — drop any auto-pause flag.
     this.autoPaused = false;
+    this.persistQueueSnapshot();
     this.emit("stateChange");
     return "Resumed";
   }
 
   private cmdStop(): string {
+    this.restoredPauseIntent = null;
+    this.queueRestoreToken = null;
+    this.queueRestoreResolving = false;
     // Read the current song BEFORE queue.clear() so we can tell whether the
     // sidecar needs stopping.
     if (this.queue.current()?.platform === "spotify") {
@@ -1682,6 +1752,9 @@ export class BotInstance extends EventEmitter {
   }
 
   private cmdClear(): string {
+    this.restoredPauseIntent = null;
+    this.queueRestoreToken = null;
+    this.queueRestoreResolving = false;
     this.spotifyController.stop();
     this.currentSourceIsSpotify = false;
     this.player.stop();
@@ -2030,7 +2103,7 @@ export class BotInstance extends EventEmitter {
   /** Synchronous snapshot writer. Persists the live queue (or clears the row
    *  when empty). Best-effort — a DB failure logs and never interrupts play. */
   private persistQueueSnapshot(): void {
-    if (!this.config.savedQueuesEnabled) return;
+    if (this.mirrorSource || !this.config.savedQueuesEnabled) return;
     try {
       const snap = this.queue.snapshot();
       if (snap.songs.length === 0) {
@@ -2044,6 +2117,10 @@ export class BotInstance extends EventEmitter {
         mode: snap.mode,
         isFmMode: this.isFmMode,
         fmPlatform: this.isFmMode && this.fmProvider ? this.fmProvider.platform : "",
+        paused: !this.autoPaused && (this.restoredPauseIntent === true || this.player.getState() === "paused" ||
+          !!(this.streamRecovery?.pauseRequested && this.streamRecovery.song === this.queue.current() &&
+            this.streamRecovery.generation === this.lifecycleGeneration &&
+            this.streamRecovery.session === this.player.getPlaybackSessionId())),
       });
     } catch (err) {
       this.logger.warn({ err }, "queue snapshot persist failed");
@@ -2060,9 +2137,9 @@ export class BotInstance extends EventEmitter {
     this.snapshotTimer.unref?.();
   }
 
-  /** Restore + resume the live queue after (re)connect. Best-effort: resumes
-   *  the current track from its START (URLs are re-resolved; no persisted
-   *  elapsed). Spotify resume depends on the sidecar being available. */
+  /** Restore the live queue after (re)connect, retaining a manual pause.
+   *  The current track starts at its beginning (URLs are re-resolved; elapsed
+   *  is not persisted). Spotify needs its sidecar to prepare the paused track. */
   private async restoreQueueFromSnapshot(): Promise<void> {
     if (!this.config.savedQueuesEnabled) return;
     let st;
@@ -2073,6 +2150,8 @@ export class BotInstance extends EventEmitter {
       return;
     }
     if (!st || st.songs.length === 0) return;
+    this.restoredPauseIntent = st.paused === true;
+    this.queueRestoreToken = Symbol("queue restoration");
     this.queue.restore({
       songs: st.songs,
       currentIndex: st.currentIndex,
@@ -2085,7 +2164,7 @@ export class BotInstance extends EventEmitter {
     const current = this.queue.current();
     if (current) {
       this.player.resetFailures();
-      await this.resolveAndPlay(current);
+      await this.resolveAndPlay(current, st.paused === true);
     }
     this.logger.info(
       { count: st.songs.length, index: st.currentIndex },
@@ -2314,7 +2393,7 @@ export class BotInstance extends EventEmitter {
       name: this.name,
       connected: this.connected,
       playing: playerState === "playing",
-      paused: playerState === "paused" || !!recoveryPaused,
+      paused: this.restoredPauseIntent === true || playerState === "paused" || !!recoveryPaused,
       currentSong: this.queue.current(),
       queueSize: this.queue.size(),
       volume: this.player.getVolume(),
