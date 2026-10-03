@@ -84,14 +84,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    outputs:
+      diagnostics: ${{ steps.diagnostics.outputs.summary }}
     env:
       FFMPEG_BIN: /usr/bin/ffmpeg
     steps:
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
       - name: Set up Node.js
+        id: node_setup
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -100,25 +104,93 @@ jobs:
             package-lock.json
             web/package-lock.json
       - name: Install native build dependencies and FFmpeg
+        id: system_deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg python3 make g++
       - name: Install dependencies
+        id: dependencies
         run: |
           npm ci
           npm ci --prefix web
       - name: Check native addons
+        id: native
         run: npm run check:native
       - name: Type check backend
-        run: npx tsc --noEmit
+        id: typecheck
+        shell: bash
+        run: |
+          set -o pipefail
+          npx tsc --noEmit 2>&1 | tee "$RUNNER_TEMP/typecheck-diagnostics.txt"
       - name: Test
-        run: npm test
+        id: tests
+        run: npm test -- --reporter=default --reporter=json --outputFile="$RUNNER_TEMP/vitest-results.json"
       - name: Validate Compose configuration and helper syntax
+        id: compose
         run: |
           docker compose -f compose.yaml config --quiet
           docker compose --project-directory . -f scripts/docker/docker-compose.yml config --quiet
           sh -n scripts/docker/install-yt-dlp.sh
           node --check scripts/docker/healthcheck.mjs
+
+      - name: Summarize failed checks without logs or exception messages
+        id: diagnostics
+        if: always() && failure() && github.event_name != 'pull_request'
+        env:
+          CHECK_RESULTS: >-
+            {"checkout":"${{ steps.checkout.outcome }}","node_setup":"${{ steps.node_setup.outcome }}","system_deps":"${{ steps.system_deps.outcome }}","dependencies":"${{ steps.dependencies.outcome }}","native":"${{ steps.native.outcome }}","typecheck":"${{ steps.typecheck.outcome }}","tests":"${{ steps.tests.outcome }}","compose":"${{ steps.compose.outcome }}"}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          outcomes = json.loads(os.environ['CHECK_RESULTS'])
+          summary = {'failed_stages': [name for name, outcome in outcomes.items() if outcome == 'failure']}
+          workspace = pathlib.Path(os.environ['GITHUB_WORKSPACE']).resolve()
+
+          def safe_file(value):
+              try:
+                  path = pathlib.Path(value)
+                  if path.is_absolute():
+                      path = path.resolve().relative_to(workspace)
+                  name = path.as_posix()
+                  if re.fullmatch(r'(?:src|web|scripts)/[A-Za-z0-9_./-]+', name) and '..' not in path.parts:
+                      return name[:200]
+              except (TypeError, ValueError, OSError):
+                  pass
+              return 'unavailable'
+
+          def safe_title(value):
+              value = str(value)
+              value = re.sub(r'https?://\S+|\b\S+@\S+\b', '[redacted]', value)
+              value = re.sub(r"""["'][^"']*["']""", '[quoted]', value)
+              value = re.sub(r'\b[A-Za-z0-9_./+=-]{24,}\b', '[redacted]', value)
+              value = re.sub(r'(?i)(password|token|secret|cookie|identity|api.?key)\s*[:=]\s*\S+', r'\1=[redacted]', value)
+              return re.sub(r'[^A-Za-z0-9 _.,:;!?()\[\]/-]', ' ', value)[:160]
+
+          report = temp / 'vitest-results.json'
+          if report.is_file():
+              try:
+                  data = json.loads(report.read_text())
+                  failed = []
+                  for suite in data.get('testResults', []):
+                      for assertion in suite.get('assertionResults', []):
+                          if assertion.get('status') == 'failed':
+                              failed.append({'file': safe_file(suite.get('name')), 'test': safe_title(assertion.get('fullName') or assertion.get('title') or 'unavailable')})
+                  summary['failed_tests'] = failed[:20]
+                  summary['failed_test_count'] = len(failed)
+              except (ValueError, TypeError, OSError):
+                  summary['test_report'] = 'unavailable'
+          typecheck = temp / 'typecheck-diagnostics.txt'
+          if typecheck.is_file():
+              errors = []
+              for line in typecheck.read_text(errors='replace').splitlines():
+                  match = re.match(r'^(.+)\(\d+,\d+\): error (TS\d+):', line)
+                  if match:
+                      errors.append({'file': safe_file(match.group(1)), 'code': match.group(2)})
+              summary['typecheck_errors'] = errors[:20]
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('summary=' + json.dumps(summary, separators=(',', ':')) + '\n')
+          PY
 
   # Pull requests can build both platforms, with no package write permission.
   build-pr:
@@ -210,6 +282,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           STATUS_PHASE: checks
+          TEST_DIAGNOSTICS: ${{ needs.test.outputs.diagnostics }}
           JOB_RESULTS: >-
             {"test":"${{ needs.test.result }}","configuration":"${{ needs.configuration.result }}"}
         run: |
@@ -251,6 +324,11 @@ jobs:
                   raise SystemExit('Existing status release has invalid body')
               if status.get('revision') != revision:
                   raise SystemExit('Existing status release revision mismatch')
+          if os.environ.get('TEST_DIAGNOSTICS'):
+              diagnostics = json.loads(os.environ['TEST_DIAGNOSTICS'])
+              if not isinstance(diagnostics, dict):
+                  raise SystemExit('Invalid diagnostic summary')
+              status['test_diagnostics'] = diagnostics
           status['job_results'] = results
           if os.environ['STATUS_PHASE'] == 'checks':
               status['status'] = 'checks_passed' if checks_passed else 'checks_failed'
@@ -377,8 +455,9 @@ jobs:
           previous = json.loads(release.get('body') or '{}')
           if previous.get('revision') != os.environ['GITHUB_SHA']:
               raise SystemExit('Existing release revision mismatch')
-          if 'job_results' in previous:
-              status['job_results'] = previous['job_results']
+          for key in ('job_results', 'test_diagnostics'):
+              if key in previous:
+                  status[key] = previous[key]
           request(f"{api}/repos/{repo}/releases/{release['id']}", 'PATCH', {'body': json.dumps(status, indent=2)})
           upload_url = release['upload_url'].split('{', 1)[0]
           parsed = urllib.parse.urlparse(upload_url)
