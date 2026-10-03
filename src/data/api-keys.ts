@@ -35,6 +35,7 @@ export interface CreatedApiKey {
 export interface ApiKeyStore {
   /** Returns null when the per-user key cap is reached. */
   create(userId: string, name: string): CreatedApiKey | null;
+  findById(id: string): ApiKeyWithUser | null;
   listForUser(userId: string): ApiKeyRow[];
   listAll(): ApiKeyWithUser[];
   /** With userId, only deletes a key owned by that user. */
@@ -60,7 +61,9 @@ export function createApiKeyStore(db: Database.Database): ApiKeyStore {
      ORDER BY k.createdAt DESC`
   );
   const selectByIdStmt = db.prepare(
-    "SELECT id, userId, name, keyPrefix, createdAt, lastUsedAt FROM api_keys WHERE id = ?"
+    `SELECT k.id, k.userId, k.name, k.keyPrefix, k.createdAt, k.lastUsedAt, u.username
+     FROM api_keys k INNER JOIN users u ON u.id = k.userId
+     WHERE k.id = ?`
   );
   const deleteStmt = db.prepare("DELETE FROM api_keys WHERE id = ?");
   const deleteAllForUserStmt = db.prepare("DELETE FROM api_keys WHERE userId = ?");
@@ -89,6 +92,10 @@ export function createApiKeyStore(db: Database.Database): ApiKeyStore {
       };
       insertStmt.run(row.id, row.userId, row.name, hashKey(rawKey), row.keyPrefix, row.createdAt);
       return { key: row, rawKey };
+    },
+
+    findById(id) {
+      return (selectByIdStmt.get(id) as ApiKeyWithUser | undefined) ?? null;
     },
 
     listForUser(userId) {

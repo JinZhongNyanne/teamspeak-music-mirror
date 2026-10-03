@@ -7,8 +7,8 @@ import type { Logger } from "../../logger.js";
 
 /**
  * API-key management (list / create / revoke), mounted at /api/keys.
- * Only interactive sessions may manage keys: a leaked key must never be able
- * to mint its own replacements.
+ * Only interactive sessions may call these endpoints. Administrator keys
+ * retain user-management authority through /api/users.
  */
 export function createApiKeysRouter(apiKeys: ApiKeyStore, audit: AuditStore, logger: Logger): Router {
   const router = Router();
@@ -63,11 +63,8 @@ export function createApiKeysRouter(apiKeys: ApiKeyStore, audit: AuditStore, log
   // DELETE /api/keys/:id — revoke; members only their own, admins any.
   router.delete("/:id", (req, res) => {
     const user = req.user!;
-    const ok =
-      user.role === "admin"
-        ? apiKeys.delete(req.params.id)
-        : apiKeys.delete(req.params.id, user.id);
-    if (!ok) {
+    const key = apiKeys.findById(req.params.id);
+    if (!key || !apiKeys.delete(key.id, user.role === "admin" ? undefined : user.id)) {
       res.status(404).json({ error: "API key not found" });
       return;
     }
@@ -75,8 +72,8 @@ export function createApiKeysRouter(apiKeys: ApiKeyStore, audit: AuditStore, log
       audit.record({
         actorId: user.id,
         actorUsername: user.username,
-        targetUserId: user.id,
-        targetUsername: user.username,
+        targetUserId: key.userId,
+        targetUsername: key.username,
         action: "api_key.deleted",
       });
     } catch (auditErr) {

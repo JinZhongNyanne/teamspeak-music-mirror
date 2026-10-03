@@ -12,7 +12,15 @@ Authorization: Bearer tsmb_xxxxxxxxxxxx
 X-API-Key: tsmb_xxxxxxxxxxxx
 ```
 
-Key 在 WebUI 设置页创建,权限与所属账户一致。浏览器 session(cookie)也可调用全部端点,两者行为相同。
+Key 在 WebUI 设置页创建,权限与所属账户一致。除标注「仅浏览器 session」的端点外,API Key 与浏览器 session(cookie)使用相同的账户权限。
+
+管理员 API Key 保留完整的 REST 管理权限,包括 `/api/users` 的创建用户、重置密码与权限变更;因此也可以创建新的可登录账户。`/api/keys` 的 session 限制只约束直接密钥管理,不能作为管理员 Key 的权限隔离措施。
+
+### 密钥吊销与密码变更
+
+API Key 没有自动到期时间,可在设置页随时吊销。删除账户会同时删除其全部 Key。成功修改自己的密码或由管理员重置密码,都会吊销该账户的全部 Key;依赖这些 Key 的外部集成需要重新生成并更新凭据。失败的密码变更不会吊销 Key。
+
+修改自己的密码会保留当前浏览器 session,使其余 session 失效。管理员重置其他账户的密码会使目标账户的全部 session 失效;重置自己的密码时同样保留当前浏览器 session。
 
 ### 错误格式
 
@@ -264,6 +272,7 @@ ProfileConfig:`{ avatarEnabled, descriptionEnabled, nicknameEnabled, awayStatusE
 
 ```bash
 curl -X POST -H "X-API-Key: $KEY" -H "x-filename: theme.mp3" \
+  -H "Content-Type: application/octet-stream" \
   --data-binary @theme.mp3 http://127.0.0.1:3000/api/music/local/upload
 ```
 
@@ -330,7 +339,7 @@ curl -X POST -H "X-API-Key: $KEY" -H "x-filename: theme.mp3" \
 
 ## API 密钥管理 /api/keys(仅浏览器 session)
 
-API Key **不能**调用这些端点(403)——泄露的 Key 无法自我复制;游客 session 也被拒绝。浏览器登录后调用。
+API Key **不能直接调用这些密钥管理端点**(403);游客 session 也被拒绝。浏览器登录后调用。管理员 Key 仍保留上文所述的用户管理权限。
 
 | 方法 | 路径 | 参数 | 返回 |
 |------|------|------|------|
@@ -347,7 +356,7 @@ API Key **不能**调用这些端点(403)——泄露的 Key 无法自我复制;
 | GET | `/` | — | `{ users: [{ id, username, createdAt, role }] }` |
 | POST | `/` | `{ username, password(≥8位), role: "admin"|"member" }` | `201 { id, username, role }`;重名 409 |
 | DELETE | `/:id` | — | `204`(级联删除其 session 与 API Key) |
-| POST | `/:id/reset-password` | `{ newPassword }` | `204`(该用户的 session 与 API Key 全部失效) |
+| POST | `/:id/reset-password` | `{ newPassword }` | `204`(该用户的 API Key 全部失效,session 按上文密码变更规则处理) |
 | PATCH | `/:id/role` | `{ role: "admin"|"member" }` | `204`(不能降级最后一个管理员) |
 | GET | `/:id/permissions` | — | `{ capabilities: string[], bots: "all" | string[] }` |
 | PUT | `/:id/permissions` | `{ capabilities, bots: "all"|string[] }` | `{ success: true }` |

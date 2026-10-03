@@ -5,7 +5,7 @@ import request from "supertest";
 import { createDatabase, type BotDatabase } from "../../data/database.js";
 import { createUserStore } from "../../data/users.js";
 import { createSessionStore, type SessionStore } from "../../data/sessions.js";
-import { createAuditStore } from "../../data/audit.js";
+import { createAuditStore, type AuditStore } from "../../data/audit.js";
 import { createApiKeyStore, MAX_API_KEYS_PER_USER, type ApiKeyStore } from "../../data/api-keys.js";
 import { createPermissionStore } from "../../data/permissions.js";
 import { createRequireAuth } from "../middleware/requireAuth.js";
@@ -17,6 +17,7 @@ describe("api-keys router", () => {
   let app: express.Express;
   let sessions: SessionStore;
   let apiKeys: ApiKeyStore;
+  let audit: AuditStore;
   let adminId: string;
   let memberId: string;
   let adminToken: string;
@@ -26,7 +27,7 @@ describe("api-keys router", () => {
     botDb = createDatabase(":memory:");
     const users = createUserStore(botDb.db);
     sessions = createSessionStore(botDb.db);
-    const audit = createAuditStore(botDb.db);
+    audit = createAuditStore(botDb.db);
     const permissions = createPermissionStore(botDb.db);
     apiKeys = createApiKeyStore(botDb.db);
     const admin = await users.createUser("alice", "pw-alice", "admin");
@@ -112,11 +113,20 @@ describe("api-keys router", () => {
     expect(apiKeys.listForUser(adminId)).toHaveLength(1);
   });
 
-  it("an admin can delete another user's key", async () => {
+  it("an admin revoking another user's key audits that key's owner", async () => {
     const { key } = apiKeys.create(memberId, "member-key")!;
     const res = await asAdmin().delete(`/api/keys/${key.id}`);
     expect(res.status).toBe(200);
     expect(apiKeys.listForUser(memberId)).toHaveLength(0);
+    expect(audit.list(10, 0)).toEqual([
+      expect.objectContaining({
+        actorId: adminId,
+        actorUsername: "alice",
+        targetUserId: memberId,
+        targetUsername: "bob",
+        action: "api_key.deleted",
+      }),
+    ]);
   });
 
   it("admin can list all keys with ?all=1, members cannot", async () => {
