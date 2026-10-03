@@ -1683,6 +1683,7 @@ describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", 
       player: {
         getElapsed: vi.fn(() => elapsed),
         getState: vi.fn(() => state),
+        getPlaybackSessionId: vi.fn(() => 1),
         play: vi.fn(() => { state = "playing"; }),
       },
       getProviderFor: vi.fn(() => provider),
@@ -1749,5 +1750,94 @@ describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", 
     });
     expect(await resumeInterruptedStream.call(ctx)).toBe(true); // handled: don't advance again
     expect(ctx.player.play).not.toHaveBeenCalled();
+  });
+});
+
+describe("BotInstance trackEnd — stale playback sessions", () => {
+  function makeEndedCtx(platform = "bilibili", duration = 10_000) {
+    const song = {
+      id: "ended", name: "Ended", artist: "A", album: "", coverUrl: "",
+      platform, duration, url: "old",
+    };
+    let current: any = song;
+    let state = "idle";
+    let session = 1;
+    const player = new EventEmitter() as any;
+    player.getState = () => state;
+    player.getElapsed = () => 1000;
+    player.getPlaybackSessionId = () => session;
+    player.play = vi.fn(() => { session++; state = "playing"; });
+    const provider = { getSongUrl: vi.fn(async () => ({ url: "fresh" })) };
+    const advances: string[] = [];
+    const ctx: any = {
+      song, provider, player, connected: true, effectiveDuration: duration,
+      streamRecovery: null, queue: { current: () => current },
+      spotifyController: new EventEmitter(), tsClient: { sendVoiceData: vi.fn() },
+      logger: { warn: vi.fn(), debug: vi.fn(), error: vi.fn() }, emit: vi.fn(),
+      getProviderFor: () => provider,
+      playNext: vi.fn(async () => { advances.push(current?.id ?? "empty"); return true; }),
+      replace: () => { current = { ...song, id: "replacement" }; session++; state = "playing"; },
+      stop: () => { current = null; session++; state = "idle"; },
+      restartSameSong: () => { session++; state = "idle"; },
+      pause: () => { state = "paused"; },
+      advances,
+    };
+    ctx.resumeInterruptedStream = (BotInstance.prototype as any).resumeInterruptedStream.bind(ctx);
+    setupPlayerEvents.call(ctx);
+    return ctx;
+  }
+
+  async function flushEvents() {
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+
+  it.each(["netease", "bilibili"])("an old normal %s EOF never skips a pending replacement", async platform => {
+    const ctx = makeEndedCtx(platform, 1000);
+    const replacement = Promise.resolve().then(() => ctx.replace());
+    ctx.player.emit("trackEnd");
+    await replacement;
+    await flushEvents();
+    expect(ctx.advances).not.toContain("replacement");
+  });
+
+  it("normal EOF still advances the ending track when no replacement arrives", async () => {
+    const ctx = makeEndedCtx("netease", 1000);
+    ctx.player.emit("trackEnd");
+    await flushEvents();
+    expect(ctx.advances).toEqual(["ended"]);
+  });
+
+  it("a failed recovery never advances a replacement", async () => {
+    const ctx = makeEndedCtx();
+    const lookup = deferred<{ url: string }>();
+    ctx.provider.getSongUrl.mockReturnValue(lookup.promise);
+    ctx.player.emit("trackEnd");
+    ctx.replace();
+    lookup.reject(new Error("temporary lookup failure"));
+    await flushEvents();
+    expect(ctx.advances).toEqual([]);
+  });
+
+  it.each(["stop", "restartSameSong", "pause"])("recovery does not overwrite playback after %s", async action => {
+    const ctx = makeEndedCtx();
+    const lookup = deferred<{ url: string }>();
+    ctx.provider.getSongUrl.mockReturnValue(lookup.promise);
+    ctx.player.emit("trackEnd");
+    ctx[action]();
+    lookup.resolve({ url: "fresh" });
+    await flushEvents();
+    expect(ctx.player.play).not.toHaveBeenCalled();
+    expect(ctx.advances).toEqual([]);
+  });
+
+  it("a failed recovery cannot advance a newer session of the same queue song", async () => {
+    const ctx = makeEndedCtx();
+    const lookup = deferred<{ url: string }>();
+    ctx.provider.getSongUrl.mockReturnValue(lookup.promise);
+    ctx.player.emit("trackEnd");
+    ctx.restartSameSong();
+    lookup.reject(new Error("temporary lookup failure"));
+    await flushEvents();
+    expect(ctx.advances).toEqual([]);
   });
 });

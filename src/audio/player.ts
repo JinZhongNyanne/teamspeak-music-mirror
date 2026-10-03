@@ -834,6 +834,8 @@ export class AudioPlayer extends EventEmitter {
   }
   getDuckingGain(): number { return this.duckingGainAt(performance.now()); }
   getState(): PlayerState { return this.state; }
+  /** Changes on stop or a new play/seek, so asynchronous recovery can be fenced. */
+  getPlaybackSessionId(): number { return this.sessionId; }
   // True only while attached to an external (Spotify sidecar) PCM stream. Used
   // by the orchestrator to decide whether to re-attach: stop() detaches (sets
   // externalMode=false) so this is false after any player.stop().

@@ -330,6 +330,8 @@ export class BotInstance extends EventEmitter {
     });
 
     this.player.on("trackEnd", () => {
+      const endedSong = this.queue.current();
+      const endedSession = this.player.getPlaybackSessionId();
       this.resumeInterruptedStream()
         .catch((err) => {
           this.logger.warn({ err }, "Stream resume failed");
@@ -337,6 +339,14 @@ export class BotInstance extends EventEmitter {
         })
         .then((resumed) => {
           if (resumed) return;
+          // A pending command may replace, stop, or restart the same queue
+          // song before this continuation. Only advance the session that ended.
+          if (
+            !this.connected ||
+            this.queue.current() !== endedSong ||
+            this.player.getPlaybackSessionId() !== endedSession ||
+            this.player.getState() !== "idle"
+          ) return;
           this.logger.debug("Track ended, advancing queue");
           return this.playNext();
         })
@@ -1161,6 +1171,7 @@ export class BotInstance extends EventEmitter {
     }
     const duration = this.effectiveDuration ?? song.duration;
     const position = Math.floor(this.player.getElapsed());
+    const endedSession = this.player.getPlaybackSessionId();
     if (!(duration > 0) || duration - position <= BotInstance.STREAM_END_TOLERANCE_S) {
       return false;
     }
@@ -1192,7 +1203,11 @@ export class BotInstance extends EventEmitter {
     const result = await this.getProviderFor(song.platform).getSongUrl(song.id);
     // The user may have skipped/stopped while we were resolving; never
     // clobber whatever is playing now.
-    if (this.queue.current() !== song || this.player.getState() !== "idle") return true;
+    if (
+      this.queue.current() !== song ||
+      this.player.getPlaybackSessionId() !== endedSession ||
+      this.player.getState() !== "idle"
+    ) return true;
     if (!result?.url || !this.connected) return false;
 
     song.url = result.url;
