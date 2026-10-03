@@ -197,10 +197,84 @@ jobs:
           cache-from: type=gha,scope=music-mirror
           cache-to: type=gha,scope=music-mirror,mode=max
 
+
+  checks-status:
+    if: always() && github.event_name != 'pull_request' && github.event.repository.private == true
+    needs: [test, configuration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Record private Release checks status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_PHASE: checks
+          JOB_RESULTS: >-
+            {"test":"${{ needs.test.result }}","configuration":"${{ needs.configuration.result }}"}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.parse, urllib.request
+          api = os.environ['GITHUB_API_URL'].rstrip('/')
+          repo = os.environ['GITHUB_REPOSITORY']
+          revision = os.environ['GITHUB_SHA']
+          tag = f"image-{revision}-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+
+          def request(url, method='GET', data=None, allow_missing=False):
+              payload = json.dumps(data).encode() if data is not None else None
+              req = urllib.request.Request(url, data=payload, method=method, headers={**headers, 'Content-Type': 'application/json'})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  if allow_missing and error.code == 404:
+                      return None
+                  raise SystemExit(f'Release status update failed (HTTP {error.code})')
+              except urllib.error.URLError:
+                  raise SystemExit('Release status update failed (network error)')
+
+          if request(f'{api}/repos/{repo}').get('private') is not True:
+              raise SystemExit('Release status requires a private repository')
+          results = json.loads(os.environ['JOB_RESULTS'])
+          if any(value not in ('success', 'failure', 'cancelled', 'skipped') for value in results.values()):
+              raise SystemExit('Unexpected job conclusion')
+          checks_passed = results['test'] == 'success' and results['configuration'] == 'success'
+          release = request(f'{api}/repos/{repo}/releases/tags/{urllib.parse.quote(tag, safe="")}', allow_missing=True)
+          status = {'revision': revision, 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT']}
+          if release is not None:
+              if release.get('prerelease') is not True or release.get('draft') is not False or release.get('target_commitish') != revision:
+                  raise SystemExit('Existing status release has unexpected state')
+              try:
+                  status = json.loads(release['body'])
+              except (TypeError, json.JSONDecodeError):
+                  raise SystemExit('Existing status release has invalid body')
+              if status.get('revision') != revision:
+                  raise SystemExit('Existing status release revision mismatch')
+          status['job_results'] = results
+          if os.environ['STATUS_PHASE'] == 'checks':
+              status['status'] = 'checks_passed' if checks_passed else 'checks_failed'
+          elif not checks_passed:
+              status['status'] = 'checks_failed'
+          elif results['private-release'] == 'failure':
+              status['status'] = 'build_failed'
+          elif results['private-release'] == 'cancelled':
+              status['status'] = 'build_cancelled'
+          elif results['private-release'] == 'skipped':
+              status['status'] = 'archive_skipped'
+          elif status.get('status') != 'archive_ready':
+              status['status'] = 'archive_unavailable'
+          if release is None:
+              request(f'{api}/repos/{repo}/releases', 'POST', {'tag_name': tag, 'target_commitish': revision, 'name': tag, 'body': json.dumps(status, indent=2), 'draft': False, 'prerelease': True, 'make_latest': 'false'})
+          else:
+              request(f"{api}/repos/{repo}/releases/{release['id']}", 'PATCH', {'body': json.dumps(status, indent=2)})
+          print('Private release job conclusions recorded.')
+          PY
+
   # Contents-readable fallback, independent of GHCR publishing and package access.
   private-release:
     if: github.event_name != 'pull_request' && github.event.repository.private == true && needs.configuration.outputs.release_archive == 'true'
-    needs: [test, configuration]
+    needs: [test, configuration, checks-status]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -292,14 +366,20 @@ jobs:
           repository = request(f'{api}/repos/{repo}')
           if repository.get('private') is not True:
               raise SystemExit('Release delivery requires a private repository')
-          tag = f"image-{os.environ['GITHUB_SHA']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          tag = f"image-{os.environ['GITHUB_SHA']}-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
           manifest = json.loads((temp / 'image-manifest.json').read_text())
-          status = {**manifest, 'status': 'archive_pending'}
+          status = {**manifest, 'status': 'archive_pending', 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT']}
           release = request(f'{api}/repos/{repo}/releases/tags/{urllib.parse.quote(tag, safe="")}', allow_missing=True)
           if release is None:
               release = request(f'{api}/repos/{repo}/releases', 'POST', {'tag_name': tag, 'target_commitish': os.environ['GITHUB_SHA'], 'name': tag, 'body': json.dumps(status, indent=2), 'draft': False, 'prerelease': True, 'make_latest': 'false'})
           elif release.get('prerelease') is not True or release.get('draft') is not False or release.get('target_commitish') != os.environ['GITHUB_SHA']:
               raise SystemExit('Existing image release has unexpected state')
+          previous = json.loads(release.get('body') or '{}')
+          if previous.get('revision') != os.environ['GITHUB_SHA']:
+              raise SystemExit('Existing release revision mismatch')
+          if 'job_results' in previous:
+              status['job_results'] = previous['job_results']
+          request(f"{api}/repos/{repo}/releases/{release['id']}", 'PATCH', {'body': json.dumps(status, indent=2)})
           upload_url = release['upload_url'].split('{', 1)[0]
           parsed = urllib.parse.urlparse(upload_url)
           if parsed.scheme != 'https' or parsed.hostname != 'uploads.github.com':
@@ -319,4 +399,77 @@ jobs:
           status['status'] = 'archive_ready'
           request(f"{api}/repos/{repo}/releases/{release['id']}", 'PATCH', {'body': json.dumps(status, indent=2)})
           print('Private Release archive is ready.')
+          PY
+
+  delivery-status:
+    if: always() && github.event_name != 'pull_request' && github.event.repository.private == true
+    needs: [test, configuration, publish, private-release, checks-status]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Record private Release terminal status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS_PHASE: terminal
+          JOB_RESULTS: >-
+            {"test":"${{ needs.test.result }}","configuration":"${{ needs.configuration.result }}","publish":"${{ needs.publish.result }}","private-release":"${{ needs.private-release.result }}","checks-status":"${{ needs.checks-status.result }}"}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.error, urllib.parse, urllib.request
+          api = os.environ['GITHUB_API_URL'].rstrip('/')
+          repo = os.environ['GITHUB_REPOSITORY']
+          revision = os.environ['GITHUB_SHA']
+          tag = f"image-{revision}-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+
+          def request(url, method='GET', data=None, allow_missing=False):
+              payload = json.dumps(data).encode() if data is not None else None
+              req = urllib.request.Request(url, data=payload, method=method, headers={**headers, 'Content-Type': 'application/json'})
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as error:
+                  if allow_missing and error.code == 404:
+                      return None
+                  raise SystemExit(f'Release status update failed (HTTP {error.code})')
+              except urllib.error.URLError:
+                  raise SystemExit('Release status update failed (network error)')
+
+          if request(f'{api}/repos/{repo}').get('private') is not True:
+              raise SystemExit('Release status requires a private repository')
+          results = json.loads(os.environ['JOB_RESULTS'])
+          if any(value not in ('success', 'failure', 'cancelled', 'skipped') for value in results.values()):
+              raise SystemExit('Unexpected job conclusion')
+          checks_passed = results['test'] == 'success' and results['configuration'] == 'success'
+          release = request(f'{api}/repos/{repo}/releases/tags/{urllib.parse.quote(tag, safe="")}', allow_missing=True)
+          status = {'revision': revision, 'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT']}
+          if release is not None:
+              if release.get('prerelease') is not True or release.get('draft') is not False or release.get('target_commitish') != revision:
+                  raise SystemExit('Existing status release has unexpected state')
+              try:
+                  status = json.loads(release['body'])
+              except (TypeError, json.JSONDecodeError):
+                  raise SystemExit('Existing status release has invalid body')
+              if status.get('revision') != revision:
+                  raise SystemExit('Existing status release revision mismatch')
+          status['job_results'] = results
+          if os.environ['STATUS_PHASE'] == 'checks':
+              status['status'] = 'checks_passed' if checks_passed else 'checks_failed'
+          elif not checks_passed:
+              status['status'] = 'checks_failed'
+          elif results['private-release'] == 'failure':
+              status['status'] = 'build_failed'
+          elif results['private-release'] == 'cancelled':
+              status['status'] = 'build_cancelled'
+          elif results['private-release'] == 'skipped':
+              status['status'] = 'archive_skipped'
+          elif status.get('status') != 'archive_ready':
+              status['status'] = 'archive_unavailable'
+          if release is None:
+              request(f'{api}/repos/{repo}/releases', 'POST', {'tag_name': tag, 'target_commitish': revision, 'name': tag, 'body': json.dumps(status, indent=2), 'draft': False, 'prerelease': True, 'make_latest': 'false'})
+          else:
+              request(f"{api}/repos/{repo}/releases/{release['id']}", 'PATCH', {'body': json.dumps(status, indent=2)})
+          print('Private release job conclusions recorded.')
           PY

@@ -18,13 +18,13 @@ docker build -f scripts/docker/Dockerfile -t teamspeak-music-mirror:local .
 
 私有仓库非 PR 的 CI 在普通多平台 registry 发布之外，默认独立生成 `linux/amd64` Docker archive，并交付到当前私有仓库的 GitHub Release。此任务只使用 CI 的 `GITHUB_TOKEN` Contents 权限，不依赖 Packages 登录；执行前与上传前均确认仓库为 private。Release 保持预发布状态，不更新 Latest。公开仓库 fork 跳过此任务，不影响普通 registry 发布。仓库变量 `DOCKER_RELEASE_ARCHIVE` 默认为 `true`，设为 `false` 可关闭；`DOCKER_ARCHIVE_PLATFORM` 默认为 `linux/amd64`，也可设为 `linux/arm64`。
 
-Release tag 为 `image-<完整commit SHA>-<run attempt>`，包含：
+Release tag 为 `image-<完整commit SHA>-<run ID>-<run attempt>`，包含：
 
 - `teamspeak-music-mirror-image.tar.gz`：可由 Docker load 导入的镜像。
 - `SHA256SUMS`：压缩包 SHA256。
 - `image-manifest.json`：镜像完整引用、源码 commit、构建平台、文件名和 SHA256。
 
-Release 正文为 JSON，只有 `status=archive_ready` 才表示所有资产已上传并校验；`archive_pending` 不可用于部署。此状态只证明 archive 交付完成，GHCR 发布结果仍独立。镜像标签采用 `sha-<完整commit SHA>`，便于锁定版本。
+Release 正文为 JSON，测试和配置完成后先记录 `checks_passed` 或 `checks_failed`，最终写入 `job_results`（测试、配置、registry 发布、archive 交付的结论）。archive 构建失败标记为 `build_failed`；取消和禁用也有独立状态。即使没有 Actions 读取权限，也能通过 Contents API 查询这些结论，不包含日志或秘密。只有 `status=archive_ready` 才表示所有资产已上传并校验；`archive_pending` 不可用于部署。此状态只证明 archive 交付完成，GHCR 发布结果仍独立。镜像标签采用 `sha-<完整commit SHA>`，便于锁定版本。
 
 部署端可用已有私有仓库 Contents 读取权限请求 `GET /repos/<owner>/<repository>/releases/tags/<tag>`，核对正文 revision、platform 和状态；再用返回的资产 ID 请求 `GET /repos/<owner>/<repository>/releases/assets/<asset_id>`，使用 `Accept: application/octet-stream` 下载。资产下载可能跳转至签名对象存储 URL；仅 GitHub API 请求携带令牌，跳转下载不转发 Authorization。令牌只从受保护进程配置读取，临时签名 URL 不保存到公开资料。
 
