@@ -180,7 +180,7 @@ Jellyfin 在网页设置中输入库地址和认证方式，再开启音源；�
 
 主分支生成 `main`、`latest` 和长 SHA 标签；版本标签如 `v1.0.0` 生成对应版本系列标签。工作流使用 GitHub 提供的 `GITHUB_TOKEN`，不用在仓库放个人令牌。私有部署保持 GHCR package 为 Private，拉取需另行具备 Packages 权限；不要为绕过拉取问题改为 Public。公开仓库本身不代表包已公开。正式部署固定版本或 digest。
 
-私有仓库默认还会独立交付带完整 commit 标签和 SHA256 的 GitHub Release Docker archive，在 GHCR 拉取不可用时可加载到 NAS。仓库变量 `DOCKER_RELEASE_ARCHIVE=false` 可关闭，`DOCKER_ARCHIVE_PLATFORM` 默认 `linux/amd64`，支持改为 `linux/arm64`；公开仓库 fork 自动跳过此任务。详见 [私有 Release 交付](docs/DEPLOYMENT.md#私有-release-交付无需-ghcr-拉取权限)。
+私有仓库默认还会独立交付带完整 commit 标签和 SHA256 的 GitHub Release Docker archive，在 GHCR 拉取不可用时可加载到 NAS。仓库变量 `DOCKER_RELEASE_ARCHIVE=false` 可关闭，`DOCKER_ARCHIVE_PLATFORM` 默认 `linux/amd64`，支持改为 `linux/arm64`；公开仓库 fork 自动跳过此任务。详见 [私有 Release 交付](docs/DEPLOYMENT.md#私有-release-交付无需-ghcr-拉取权限)。 Release 正文同时记录 CI 检查和各构建任务的结论；失败时提供经过过滤的步骤、测试名称或 TypeScript 错误码，不存储原始日志、异常堆栈和秘密。只有 `archive_ready` 状态及哈希校验均通过的归档可用于部署。
 
 ## TrueNAS SCALE 25.04 自定义应用
 

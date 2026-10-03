@@ -1,5 +1,5 @@
 # Compatibility entry point. Use the root compose.yaml for new deployments.
 # Keep .env beside compose.yaml and run from the repository root:
-# docker compose --project-directory . -f scripts/docker/docker-compose.yml up -d
+# docker compose -f scripts/docker/docker-compose.yml up -d
 include:
   - ../../compose.yaml

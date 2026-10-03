@@ -129,7 +129,7 @@ jobs:
         id: compose
         run: |
           docker compose -f compose.yaml config --quiet
-          docker compose --project-directory . -f scripts/docker/docker-compose.yml config --quiet
+          docker compose -f scripts/docker/docker-compose.yml config --quiet
           sh -n scripts/docker/install-yt-dlp.sh
           node --check scripts/docker/healthcheck.mjs
 
