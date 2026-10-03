@@ -200,7 +200,7 @@ export class BotInstance extends EventEmitter {
   /** 当前曲实际播放时长（试听片段秒数或完整 duration）；resolveAndPlay 赋值。 */
   private effectiveDuration: number | undefined;
   /** Resume attempts for the current song's stream (#161); see resumeInterruptedStream. */
-  private streamRecovery: { song: QueuedSong; attempts: number; position: number } | null = null;
+  private streamRecovery: { song: QueuedSong; attempts: number; position: number; session: number; pauseRequested: boolean; inFlight: boolean } | null = null;
   private playGate: Promise<unknown> = Promise.resolve();
   /** Per-bot Jellyfin playback-report session (start / ~10s progress / stop).
    *  null when the wired provider has no reporting capability. */
@@ -345,7 +345,8 @@ export class BotInstance extends EventEmitter {
             !this.connected ||
             this.queue.current() !== endedSong ||
             this.player.getPlaybackSessionId() !== endedSession ||
-            this.player.getState() !== "idle"
+            this.player.getState() !== "idle" ||
+            (this.streamRecovery?.song === endedSong && this.streamRecovery.pauseRequested)
           ) return;
           this.logger.debug("Track ended, advancing queue");
           return this.playNext();
@@ -1180,11 +1181,13 @@ export class BotInstance extends EventEmitter {
     if (
       !recovery ||
       recovery.song !== song ||
+      recovery.session !== endedSession ||
       position - recovery.position > BotInstance.STREAM_END_TOLERANCE_S
     ) {
-      this.streamRecovery = { song, attempts: 0, position };
+      this.streamRecovery = { song, attempts: 0, position, session: endedSession, pauseRequested: false, inFlight: false };
     }
     const state = this.streamRecovery!;
+    if (state.inFlight) return true;
     if (state.attempts >= BotInstance.MAX_STREAM_RESUMES) {
       this.logger.warn(
         { songId: song.id, position, duration, attempts: state.attempts },
@@ -1200,18 +1203,31 @@ export class BotInstance extends EventEmitter {
       { songId: song.id, position, duration, attempt: state.attempts },
       "Stream ended before the track did — resuming with a fresh URL",
     );
-    const result = await this.getProviderFor(song.platform).getSongUrl(song.id);
+    state.inFlight = true;
+    let result: Awaited<ReturnType<MusicProvider["getSongUrl"]>>;
+    try {
+      result = await this.getProviderFor(song.platform).getSongUrl(song.id);
+    } finally {
+      state.inFlight = false;
+    }
     // The user may have skipped/stopped while we were resolving; never
     // clobber whatever is playing now.
     if (
       this.queue.current() !== song ||
       this.player.getPlaybackSessionId() !== endedSession ||
       this.player.getState() !== "idle"
-    ) return true;
+    ) {
+      if (this.streamRecovery === state) this.streamRecovery = null;
+      return true;
+    }
     if (!result?.url || !this.connected) return false;
 
     song.url = result.url;
     this.player.play(result.url, position, duration);
+    state.session = this.player.getPlaybackSessionId();
+    // During the lookup the ended player is idle, so pause() alone cannot
+    // remember the user's intent. Pause the recovered stream before it emits frames.
+    if (state.pauseRequested) this.player.pause();
     this.emit("stateChange");
     return true;
   }
@@ -1438,6 +1454,10 @@ export class BotInstance extends EventEmitter {
   }
 
   private cmdPause(): string {
+    const recovery = this.streamRecovery;
+    if (recovery && recovery.song === this.queue.current() && this.player.getState() === "idle") {
+      recovery.pauseRequested = true;
+    }
     this.player.pause();
     if (this.queue.current()?.platform === "spotify") {
       this.spotifyController.pause().catch((err) =>
@@ -1450,7 +1470,15 @@ export class BotInstance extends EventEmitter {
   }
 
   private cmdResume(): string {
+    const recovery = this.streamRecovery;
+    const retryInterrupted = recovery && recovery.song === this.queue.current() &&
+      recovery.session === this.player.getPlaybackSessionId() && !recovery.inFlight &&
+      recovery.pauseRequested && this.player.getState() === "idle";
+    if (recovery) recovery.pauseRequested = false;
     this.player.resume();
+    // A lookup that failed while paused has no stream to resume. Re-enter
+    // the bounded end/recovery handler instead of reporting success forever idle.
+    if (retryInterrupted) this.player.emit("trackEnd");
     if (this.queue.current()?.platform === "spotify") {
       this.spotifyController.resume().catch((err) =>
         this.logger.warn({ err }, "Spotify resume failed"));
