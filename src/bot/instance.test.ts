@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { BotInstance, COMMAND_DENIED_MESSAGE, spotifyPortsForBotId } from "./instance.js";
 import type { BotInstanceOptions } from "./instance.js";
@@ -134,6 +134,9 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
     return {
       disconnectEmitted: false,
       connected: false,
+      lifecycleGeneration: 0,
+      idleTimer: null,
+      _cancelIdleTimer: (BotInstance.prototype as any)._cancelIdleTimer,
       tsClient: {
         connect: vi.fn(() => connectPromise),
         getResolvedVoiceEndpoint: vi.fn(() => ({ host: "203.0.113.20", port: 12000 })),
@@ -1660,6 +1663,8 @@ describe("cmdPlaylist with a playlist link (#160)", () => {
 });
 
 describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", () => {
+  beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
   const resumeInterruptedStream = (BotInstance.prototype as any).resumeInterruptedStream as (
     this: unknown,
   ) => Promise<boolean>;
@@ -1678,6 +1683,7 @@ describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", 
       song,
       provider,
       connected: true,
+      lifecycleGeneration: 0,
       effectiveDuration: song.duration,
       streamRecovery: null,
       queue: { current: vi.fn(() => song) },
@@ -1739,7 +1745,10 @@ describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", 
 
   it("falls through to advancing when no fresh URL can be fetched", async () => {
     const ctx = makeCtx({ url: null });
-    expect(await resumeInterruptedStream.call(ctx)).toBe(false);
+    const recovery = resumeInterruptedStream.call(ctx);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await recovery).toBe(false);
+    expect(ctx.provider.getSongUrl).toHaveBeenCalledTimes(3);
     expect(ctx.player.play).not.toHaveBeenCalled();
   });
 
@@ -1755,6 +1764,8 @@ describe("resumeInterruptedStream — long B站 streams dying mid-play (#161)", 
 });
 
 describe("BotInstance trackEnd — stale playback sessions", () => {
+  beforeEach(() => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] }));
+  afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); });
   function makeEndedCtx(platform = "bilibili", duration = 10_000) {
     const song = {
       id: "ended", name: "Ended", artist: "A", album: "", coverUrl: "",
@@ -1774,6 +1785,7 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     const advances: string[] = [];
     const ctx: any = {
       song, provider, player, connected: true, effectiveDuration: duration,
+      lifecycleGeneration: 0,
       streamRecovery: null, queue: { current: () => current },
       spotifyController: new EventEmitter(), tsClient: { sendVoiceData: vi.fn() },
       logger: { warn: vi.fn(), debug: vi.fn(), error: vi.fn() }, emit: vi.fn(),
@@ -1893,7 +1905,7 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     expect(ctx.advances).toEqual([]);
   });
 
-  it("resume after a paused failed lookup retries recovery instead of remaining idle", async () => {
+  it("resume while a paused failed lookup waits for retry continues after its backoff", async () => {
     const ctx = makeEndedCtx();
     const lookup = deferred<{ url: string }>();
     ctx.provider.getSongUrl.mockReturnValue(lookup.promise);
@@ -1903,7 +1915,7 @@ describe("BotInstance trackEnd — stale playback sessions", () => {
     await flushEvents();
     ctx.provider.getSongUrl.mockResolvedValue({ url: "recovered" });
     ctx.resume();
-    await flushEvents();
+    await vi.advanceTimersByTimeAsync(1000);
     expect(ctx.player.getState()).toBe("playing");
     expect(ctx.player.play).toHaveBeenCalledWith("recovered", 1000, 10_000);
     expect(ctx.advances).toEqual([]);

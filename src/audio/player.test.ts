@@ -40,6 +40,44 @@ describe("buildFfmpegArgs", () => {
     expect(headers).toContain("User-Agent: Mozilla/5.0");
   });
 
+  it.each([
+    "https://bilivideo.com/audio.m4s",
+    "https://upos-sz-mirrorcos.bilivideo.com/audio.m4s",
+    "https://bilivideo.cn/audio.m4s",
+    "https://cn-example-live-01.bilivideo.cn/audio.m4s",
+    "https://bilibili.com/audio.m4s",
+    "https://www.bilibili.com/audio.m4s",
+    "https://szbdyd.com/audio.m4s",
+    "https://stream.mcdn.szbdyd.com/audio.m4s",
+    "https://xy219x131x72x38xy.mcdn.bilivideo.cn.szbdyd.com/audio.m4s",
+    "HTTPS://UPOS-SZ-MIRRORCOS.BILIVIDEO.COM:443/audio.m4s",
+    "https://upos-sz-mirrorcos.bilivideo.com./audio.m4s",
+  ])("uses Bilibili headers and input-side seeking for the actual CDN host in %s", (url) => {
+    const args = buildFfmpegArgs(url, 2220);
+    const headers = getHeadersArg(args);
+    expect(headers).toContain("Referer: https://www.bilibili.com");
+    expect(headers).toContain("User-Agent: Mozilla/5.0");
+    expect(args[args.indexOf("-ss") + 1]).toBe("2220");
+    expect(args.indexOf("-ss")).toBeLessThan(args.indexOf("-i"));
+    expect(args.lastIndexOf("-ss")).toBe(args.indexOf("-ss"));
+    expect(args).toContain("-reconnect_at_eof");
+  });
+
+  it.each([
+    "https://bilivideo.com.evil.example/audio.m4s",
+    "https://evilbilivideo.com/audio.m4s",
+    "https://bilivideo.cn.evil.example/audio.m4s",
+    "https://bilibili.com.evil.example/audio.m4s",
+    "https://evilbilibili.com/audio.m4s",
+    "https://szbdyd.com.evil.example/audio.m4s",
+    "https://evil.example/audio.m4s?redirect=https://upos-sz-mirrorcos.bilivideo.com/x",
+    "https://bilibili.com@evil.example/audio.m4s",
+  ])("does not trust Bilibili text outside an allowed hostname in %s", (url) => {
+    const args = buildFfmpegArgs(url, 2220);
+    expect(args).not.toContain("-headers");
+    expect(args.indexOf("-ss")).toBeGreaterThan(args.indexOf("-i"));
+  });
+
   it("does not set custom headers for unknown URLs", () => {
     const url = "https://example.com/song.mp3";
     const args = buildFfmpegArgs(url, 0);
@@ -825,7 +863,7 @@ describe("AudioPlayer stall/EOF end-detection is gated on playing state (R3-4)",
   // PCM frame (unknown duration -> isNearEnd forced true). startFrameLoop() runs
   // the genuine loop; no real process is spawned (fake ffmpeg has no pid, so the
   // end path never touches forceCleanup/process.kill).
-  function makeStalledPlaying(): AudioPlayer {
+  function makeStalledPlaying(duration = 0): AudioPlayer {
     const player = new AudioPlayer(silentLogger);
     const p = player as unknown as {
       ffmpeg: unknown;
@@ -837,7 +875,7 @@ describe("AudioPlayer stall/EOF end-detection is gated on playing state (R3-4)",
       startFrameLoop(): void;
     };
     p.ffmpeg = { pid: undefined }; // live ffmpeg, but delivers no PCM
-    p.currentSongDuration = 0; // unknown duration -> isNearEnd === true
+    p.currentSongDuration = duration;
     p.pcmBuffer = Buffer.alloc(0); // always < one PCM frame
     p.emptyFrameAttempts = 0;
     p.framesPlayed = 0;
@@ -845,6 +883,113 @@ describe("AudioPlayer stall/EOF end-detection is gated on playing state (R3-4)",
     p.startFrameLoop();
     return player;
   }
+
+  it.each([0, 4020])("keeps emitting one full PCM frame per tick beyond 60 seconds with duration %s", (duration) => {
+    vi.useFakeTimers(FAKE_TIMER_OPTS);
+    const player = makeStalledPlaying(duration);
+    let ended = 0;
+    let frames = 0;
+    player.on("trackEnd", () => ended++);
+    player.on("frame", () => frames++);
+    try {
+      const internal = player as unknown as { pcmBuffer: Buffer };
+      const frame = Buffer.alloc(FRAME_BYTES);
+      for (let tick = 0; tick < 3100; tick++) {
+        internal.pcmBuffer = frame;
+        vi.advanceTimersByTime(20);
+      }
+      expect(frames).toBe(3100);
+      expect(player.getElapsed()).toBe(62);
+      expect(ended).toBe(0);
+      expect(player.getState()).toBe("playing");
+    } finally {
+      player.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("resets the true-underrun budget after a successful frame even when no PCM reserve remains", () => {
+    vi.useFakeTimers(FAKE_TIMER_OPTS);
+    const player = makeStalledPlaying();
+    let ended = 0;
+    player.on("trackEnd", () => ended++);
+    try {
+      vi.advanceTimersByTime(20 * 249);
+      (player as unknown as { pcmBuffer: Buffer }).pcmBuffer = Buffer.alloc(FRAME_BYTES);
+      vi.advanceTimersByTime(20);
+      expect(ended).toBe(0);
+      expect(player.getElapsed()).toBe(0.02);
+      vi.advanceTimersByTime(20 * 249);
+      expect(ended).toBe(0);
+      vi.advanceTimersByTime(20);
+      expect(ended).toBe(1);
+      expect(player.getState()).toBe("idle");
+    } finally {
+      player.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("still ends a genuine far-from-end stall after 60 seconds without a frame", () => {
+    vi.useFakeTimers(FAKE_TIMER_OPTS);
+    const player = makeStalledPlaying(4020);
+    let ended = 0;
+    player.on("trackEnd", () => ended++);
+    try {
+      vi.advanceTimersByTime(59980);
+      expect(ended).toBe(0);
+      expect(player.getState()).toBe("playing");
+      vi.advanceTimersByTime(20);
+      expect(ended).toBe(1);
+      expect(player.getState()).toBe("idle");
+    } finally {
+      player.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("still emits natural EOF after delivering the final buffered frame", () => {
+    vi.useFakeTimers(FAKE_TIMER_OPTS);
+    const player = makeStalledPlaying(4020);
+    let ended = 0;
+    let frames = 0;
+    player.on("trackEnd", () => ended++);
+    player.on("frame", () => frames++);
+    try {
+      Object.assign(player, { ffmpeg: null, pcmBuffer: Buffer.alloc(FRAME_BYTES) });
+      vi.advanceTimersByTime(20);
+      expect(frames).toBe(1);
+      expect(ended).toBe(1);
+      expect(player.getState()).toBe("idle");
+    } finally {
+      player.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not count a consumed frame as successful when the encoder throws", () => {
+    vi.useFakeTimers(FAKE_TIMER_OPTS);
+    const player = makeStalledPlaying(4020);
+    const failure = new Error("offline encoder failure");
+    const errors: Error[] = [];
+    let frames = 0;
+    player.on("error", error => errors.push(error));
+    player.on("frame", () => frames++);
+    try {
+      Object.assign(player, {
+        pcmBuffer: Buffer.alloc(FRAME_BYTES),
+        encoder: { encode() { throw failure; } },
+      });
+      vi.advanceTimersByTime(20);
+      expect(errors).toEqual([failure]);
+      expect(frames).toBe(0);
+      expect(player.getElapsed()).toBe(0);
+      expect((player as unknown as { emptyFrameAttempts: number }).emptyFrameAttempts).toBe(1);
+    } finally {
+      player.stop();
+      vi.useRealTimers();
+    }
+  });
 
   it("does NOT emit trackEnd (and stays paused) when a stalled unknown-duration stream is paused past the stall threshold", () => {
     vi.useFakeTimers(FAKE_TIMER_OPTS);

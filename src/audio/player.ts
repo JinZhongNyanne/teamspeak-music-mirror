@@ -87,8 +87,20 @@ export function cleanupTempDir(dir: string): void {
 
 export function buildFfmpegArgs(url: string, seekSeconds: number): string[] {
   const args: string[] = ["-nostats"];
-  const isHttp = /^https?:\/\//i.test(url);
-  const isBilibili = isHttp && (url.includes("bilivideo") || url.includes("bilibili"));
+  let httpHostname: string | null = null;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      httpHostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    }
+  } catch {
+    // Local paths and malformed URLs must not inherit CDN-specific options.
+  }
+  const isHttp = httpHostname !== null;
+  const isBilibili = httpHostname !== null &&
+    ["bilivideo.com", "bilivideo.cn", "bilibili.com", "szbdyd.com"].some(
+      domain => httpHostname === domain || httpHostname.endsWith(`.${domain}`),
+    );
 
   if (isBilibili) {
     args.push(
@@ -662,8 +674,10 @@ export class AudioPlayer extends EventEmitter {
       // 这里的校验能防止旧的定时器回调处理新 Session 的逻辑 （
       if (loopSessionId !== this.sessionId || !this.frameLoopRunning) return;
 
+      const framesBeforeTick = this.framesPlayed;
       if (this.state === "playing") this.sendNextFrame();
       else if (this.state === "paused") this.nextFrameTime = performance.now();
+      const frameSent = this.framesPlayed > framesBeforeTick;
 
       // 检测pcmBuffer不足PCM_FRAME_BYTES导致连续循环卡死：
       // 条件1: FFmpeg仍在运行但缓冲区不足一帧，且连续多次无法获取数据
@@ -683,7 +697,9 @@ export class AudioPlayer extends EventEmitter {
       // unknown-duration stream would auto-advance ~5s later. Because the if is
       // now false while paused, the else resets emptyFrameAttempts to 0, so a
       // resumed healthy stream starts fresh and never ends instantly.
-      if (this.state === "playing" && !this.externalMode && this.ffmpeg !== null && this.pcmBuffer.length < PCM_FRAME_BYTES) {
+      // A healthy paced source can supply exactly one frame per tick, leaving
+      // no reserve after sendNextFrame. Count only ticks without emitted audio.
+      if (this.state === "playing" && !this.externalMode && !frameSent && this.ffmpeg !== null && this.pcmBuffer.length < PCM_FRAME_BYTES) {
         this.emptyFrameAttempts++;
         
         // End the track when FFmpeg has gone silent: quickly if we're near the
