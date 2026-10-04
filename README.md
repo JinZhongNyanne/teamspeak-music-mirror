@@ -162,7 +162,7 @@ Jellyfin 在网页设置中输入库地址和认证方式，再开启音源；�
 
 ## GitHub 自动构建与镜像发布
 
-默认交付使用名称以 `-private` 结尾的私有仓库，例如 `teamspeak-music-mirror-private`。源码保持可公开发布，仓库和镜像可见性按部署授权决定；不会自动改动已有仓库的名称或可见性。
+项目公开仓库：[JinZhongNyanne/teamspeak-music-mirror](https://github.com/JinZhongNyanne/teamspeak-music-mirror)，使用 MIT 许可证，并保留上游来源。运行数据、TeamSpeak 身份、平台 Cookie 和部署凭据保存在仓库之外。
 
 `.github/workflows/docker-publish.yml` 在 `main` 推送、`v*.*.*` 标签或手动触发时先进行类型检查、测试和配置验证，再构建两个架构并发布到该仓库对应的小写 GHCR 路径。PR 仅测试和构建，不推送镜像，也没有包写入权限。
 
@@ -178,9 +178,9 @@ Jellyfin 在网页设置中输入库地址和认证方式，再开启音源；�
 
 非 GHCR registry 登录使用 CI secrets `REGISTRY_USERNAME` 和 `REGISTRY_PASSWORD`。本地 Compose 可通过 `NODE_IMAGE` 设置构建基础镜像，通过 `TSMUSICBOT_IMAGE` 设置完整镜像地址；镜像加速源可作为基础镜像地址或 registry 使用。秘密只存储于 CI secrets 或部署端凭据存储。私有 GHCR 拉取需要具备读取包权限的认证，不能假定仓库 Contents token 同时支持镜像拉取。
 
-主分支生成 `main`、`latest` 和长 SHA 标签；版本标签如 `v1.0.0` 生成对应版本系列标签。工作流使用 GitHub 提供的 `GITHUB_TOKEN`，不用在仓库放个人令牌。私有部署保持 GHCR package 为 Private，拉取需另行具备 Packages 权限；不要为绕过拉取问题改为 Public。公开仓库本身不代表包已公开。正式部署固定版本或 digest。
+主分支生成 `main`、`latest` 和长 SHA 标签；版本标签如 `v1.0.0` 生成对应版本系列标签。工作流使用 GitHub 提供的 `GITHUB_TOKEN`，不用在仓库放个人令牌。公开分发镜像时，在 GitHub Packages 的 package 设置中将可见性设为 Public；GitHub 仓库公开不会自动公开已有镜像包。私有部署可以保留 Private，并使用具备 Packages 读取权限的凭据。无法匿名拉取时可按 Docker 快速开始本地构建。正式部署固定版本或 digest。
 
-私有仓库默认还会独立交付带完整 commit 标签和 SHA256 的 GitHub Release Docker archive，在 GHCR 拉取不可用时可加载到 NAS。仓库变量 `DOCKER_RELEASE_ARCHIVE=false` 可关闭，`DOCKER_ARCHIVE_PLATFORM` 默认 `linux/amd64`，支持改为 `linux/arm64`；公开仓库 fork 自动跳过此任务。详见 [私有 Release 交付](docs/DEPLOYMENT.md#私有-release-交付无需-ghcr-拉取权限)。 Release 正文同时记录 CI 检查和各构建任务的结论；失败时提供经过过滤的步骤、测试名称或 TypeScript 错误码，不存储原始日志、异常堆栈和秘密。只有 `archive_ready` 状态及哈希校验均通过的归档可用于部署。
+私有仓库默认还会独立交付带完整 commit 标签和 SHA256 的 GitHub Release Docker archive，在 GHCR 拉取不可用时可加载到 NAS。仓库变量 `DOCKER_RELEASE_ARCHIVE=false` 可关闭，`DOCKER_ARCHIVE_PLATFORM` 默认 `linux/amd64`，支持改为 `linux/arm64`；公开仓库自动跳过此任务。详见 [私有 Release 交付](docs/DEPLOYMENT.md#私有-release-交付无需-ghcr-拉取权限)。 Release 正文同时记录 CI 检查和各构建任务的结论；失败时提供经过过滤的步骤、测试名称或 TypeScript 错误码，不存储原始日志、异常堆栈和秘密。只有 `archive_ready` 状态及哈希校验均通过的归档可用于部署。
 
 ## TrueNAS SCALE 25.04 自定义应用
 

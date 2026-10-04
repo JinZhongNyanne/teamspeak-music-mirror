@@ -6,7 +6,7 @@
 
 GitHub Actions 工作流位于 [docker-publish.yml](../.github/workflows/docker-publish.yml)。默认主分支更新和版本 tag 推送触发构建，也可手动触发。镜像发布到 `ghcr.io/<owner>/<repository>`，所有者使用小写名称。主分支镜像使用 `:main`，发布 tag 按工作流生成版本标签；正式部署建议固定版本或 digest。
 
-在 GitHub 仓库中启用 Actions，并允许工作流发布 Packages。工作流使用仓库的 `GITHUB_TOKEN`，不需要将个人令牌提交到仓库。私有部署保持 GHCR 包为 Private，拉取需要单独的 Packages 权限；不要为绕过拉取问题改为 Public。公开仓库不代表包必然已经公开。
+在 GitHub 仓库中启用 Actions，并允许工作流发布 Packages。工作流使用仓库的 `GITHUB_TOKEN`，不需要将个人令牌提交到仓库。本项目公开仓库为 [JinZhongNyanne/teamspeak-music-mirror](https://github.com/JinZhongNyanne/teamspeak-music-mirror)，对应的默认镜像名称为 `ghcr.io/jinzhongnyanne/teamspeak-music-mirror`。公开分发镜像需在 GitHub Packages 设置中将 package 可见性设为 Public，仓库公开不会自动改变已有包的可见性。私有部署可保留 Private，并使用单独的 Packages 读取权限；无法匿名拉取时可以使用下方本地构建方式。
 
 本地构建：
 
@@ -16,7 +16,7 @@ docker build -f scripts/docker/Dockerfile -t teamspeak-music-mirror:local .
 
 ## 私有 Release 交付（无需 GHCR 拉取权限）
 
-私有仓库非 PR 的 CI 在普通多平台 registry 发布之外，默认独立生成 `linux/amd64` Docker archive，并交付到当前私有仓库的 GitHub Release。此任务只使用 CI 的 `GITHUB_TOKEN` Contents 权限，不依赖 Packages 登录；执行前与上传前均确认仓库为 private。Release 保持预发布状态，不更新 Latest。公开仓库 fork 跳过此任务，不影响普通 registry 发布。仓库变量 `DOCKER_RELEASE_ARCHIVE` 默认为 `true`，设为 `false` 可关闭；`DOCKER_ARCHIVE_PLATFORM` 默认为 `linux/amd64`，也可设为 `linux/arm64`。
+私有仓库非 PR 的 CI 在普通多平台 registry 发布之外，默认独立生成 `linux/amd64` Docker archive，并交付到当前私有仓库的 GitHub Release。此任务只使用 CI 的 `GITHUB_TOKEN` Contents 权限，不依赖 Packages 登录；执行前与上传前均确认仓库为 private。Release 保持预发布状态，不更新 Latest。公开仓库跳过此任务，不影响普通 registry 发布。仓库变量 `DOCKER_RELEASE_ARCHIVE` 默认为 `true`，设为 `false` 可关闭；`DOCKER_ARCHIVE_PLATFORM` 默认为 `linux/amd64`，也可设为 `linux/arm64`。
 
 Release tag 为 `image-<完整commit SHA>-<run ID>-<run attempt>`，包含：
 
