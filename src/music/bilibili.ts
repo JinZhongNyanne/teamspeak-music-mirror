@@ -43,15 +43,16 @@ export interface BiliVideoPartsResult {
 }
 
 /**
- * PCDN / P2P edge hosts (xy*.mcdn.bilivideo.cn:<port>, *.szbdyd.com). Their
+ * PCDN / P2P edge hosts (mcdn.bilivideo.*, szbdyd.com, mountaintoys.cn). Their
  * sessions get cut mid-file, which kills long streams partway (#89, #161),
  * and a reconnect to the same host rarely recovers.
  */
-const BILI_PCDN_HOST = /\.mcdn\.bilivideo\.cn$|\.szbdyd\.com$/i;
+const BILI_PCDN_HOST = /(?:^|\.)mcdn\.bilivideo\.(?:cn|com)$|(?:^|\.)(?:szbdyd\.com|mountaintoys\.cn)$/i;
+const BILI_STANDARD_CDN_HOST = /(?:^|\.)bilivideo\.com$/i;
 
 /**
- * Pick the audio URL least likely to die mid-stream: the first upos/cos
- * mirror among baseUrl + backupUrl, else the baseUrl as before.
+ * Prefer a standard Bilibili CDN over unfamiliar edge hosts, then any non-PCDN
+ * candidate. Keep the original URL when only PCDN candidates are available.
  */
 export function pickStableAudioUrl(stream: {
   baseUrl?: string;
@@ -63,14 +64,18 @@ export function pickStableAudioUrl(stream: {
   const candidates = [primary, ...(stream.backupUrl ?? stream.backup_url ?? [])].filter(
     (u): u is string => typeof u === "string" && u.length > 0,
   );
-  const stable = candidates.find((u) => {
+  const parsed = candidates.flatMap((url) => {
     try {
-      return !BILI_PCDN_HOST.test(new URL(u).hostname);
+      const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+      return [{ url, hostname }];
     } catch {
-      return false;
+      return [];
     }
   });
-  return stable ?? primary;
+  const stable = parsed.filter(({ hostname }) => !BILI_PCDN_HOST.test(hostname));
+  return stable.find(({ hostname }) => BILI_STANDARD_CDN_HOST.test(hostname))?.url
+    ?? stable[0]?.url
+    ?? primary;
 }
 
 /**

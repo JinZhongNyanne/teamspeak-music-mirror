@@ -271,3 +271,5 @@ FFMPEG_BIN=/usr/bin/ffmpeg npm test
 基于 [ZHANGTIANYAO1/teamspeak-music-bot](https://github.com/ZHANGTIANYAO1/teamspeak-music-bot) `v1.15.2`，commit `28c128d0c954c4bd6fb3a5f33f00b33282033462`，保留 MIT 许可证与 `Copyright (c) 2026 TSMusicBot Contributors`。新增功能、当前配置和部署方式以本 README 为准。
 
 原始功能说明保留在 [docs/UPSTREAM.md](docs/UPSTREAM.md) 供历史/平台深度配置参考；[docs/API.md](docs/API.md)、[docs/MIRROR.md](docs/MIRROR.md)、[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 是详细补充。运行数据、账号、身份与秘密不属于公开源码。
+
+B站部分歌曲显示播放但无声的 CDN 兼容问题与验证说明见 [Bilibili CDN 修复记录](docs/BILIBILI-CDN-20261011.md)。

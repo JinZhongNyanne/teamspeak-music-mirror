@@ -173,6 +173,39 @@ describe("pickStableAudioUrl (#161 long streams dying mid-play)", () => {
     expect(pickStableAudioUrl({ baseUrl: pcdn, backupUrl: [szbdyd, upos] })).toBe(upos);
   });
 
+  it.each([
+    "https://xy1x2x3x4xy.edge.mountaintoys.cn:4483/audio.m4s",
+    "https://mountaintoys.cn:4483/audio.m4s",
+    "https://EDGE.MOUNTAINTOYS.CN.:4483/audio.m4s",
+    "https://xy1.mcdn.bilivideo.com:4483/audio.m4s",
+  ])("avoids the PCDN host %s when a standard backup exists", (baseUrl) => {
+    expect(pickStableAudioUrl({ baseUrl, backupUrl: [upos] })).toBe(upos);
+    expect(pickStableAudioUrl({ baseUrl, backupUrl: [szbdyd] })).toBe(baseUrl);
+  });
+
+  it("prefers a known CDN over an unfamiliar non-PCDN primary", () => {
+    expect(pickStableAudioUrl({
+      baseUrl: "https://new-edge.example/audio.m4s", backupUrl: [upos],
+    })).toBe(upos);
+  });
+
+  it.each([
+    "https://notmountaintoys.cn/audio.m4s",
+    "https://mountaintoys.cn.example/audio.m4s",
+    "https://notszbdyd.com/audio.m4s",
+    "https://szbdyd.com.example/audio.m4s",
+  ])("keeps non-PCDN fallback across domain boundaries for %s", (baseUrl) => {
+    expect(pickStableAudioUrl({ baseUrl, backupUrl: [pcdn] })).toBe(baseUrl);
+  });
+
+  it.each([
+    "https://notbilivideo.com/audio.m4s",
+    "https://bilivideo.com.example/audio.m4s",
+  ])("does not promote a lookalike CDN %s", (backupUrl) => {
+    const baseUrl = "https://new-edge.example/audio.m4s";
+    expect(pickStableAudioUrl({ baseUrl, backupUrl: [backupUrl] })).toBe(baseUrl);
+  });
+
   it("keeps the baseUrl when it is already a stable host", () => {
     expect(pickStableAudioUrl({ baseUrl: upos, backupUrl: [upos2] })).toBe(upos);
   });
