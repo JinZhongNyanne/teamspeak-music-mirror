@@ -60,8 +60,8 @@ router.beforeEach(async (to) => {
     return { name: 'login', query: { next: to.fullPath } };
   }
 
-  // Guests may never reach settings/setup, even by typing the URL.
-  const GUEST_BLOCKED = new Set(['settings', 'setup']);
+  // Guests can customize appearance; server configuration remains inaccessible.
+  const GUEST_BLOCKED = new Set(['setup']);
   if (session.isGuest.value && GUEST_BLOCKED.has(to.name as string)) {
     return { name: 'home' };
   }

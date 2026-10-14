@@ -4,25 +4,93 @@
       <Icon icon="mdi:arrow-left" />
       返回
     </button>
-    <h1 class="page-title">设置</h1>
+    <header class="settings-header">
+      <div class="settings-eyebrow">偏好与管理</div>
+      <h1 class="page-title">设置</h1>
+      <p class="settings-intro">从个人偏好到机器人管理，在这里找到你需要的设置。</p>
+    </header>
+
+    <div class="settings-layout">
+      <aside class="settings-sidebar">
+        <div class="settings-nav-label">设置分类</div>
+        <nav class="settings-nav" aria-label="设置分类">
+          <button
+            v-for="category in visibleCategories"
+            :key="category.id"
+            type="button"
+            class="settings-nav-item"
+            :class="{ active: activeCategory === category.id }"
+            :aria-current="activeCategory === category.id ? 'page' : undefined"
+            aria-controls="settings-content"
+            @click="selectCategory(category.id)"
+          >
+            <Icon :icon="category.icon" class="settings-nav-icon" aria-hidden="true" />
+            <span class="settings-nav-copy">
+              <span class="settings-nav-title">{{ category.title }}</span>
+              <span class="settings-nav-description">{{ category.summary }}</span>
+            </span>
+            <Icon icon="mdi:chevron-right" class="settings-nav-arrow" aria-hidden="true" />
+          </button>
+        </nav>
+      </aside>
+
+      <div id="settings-content" class="settings-content" aria-labelledby="category-title">
+        <header ref="categoryHeader" class="category-header" tabindex="-1">
+          <span class="category-icon"><Icon :icon="currentCategory.icon" aria-hidden="true" /></span>
+          <div>
+            <h2 id="category-title">{{ currentCategory.title }}</h2>
+            <p>{{ currentCategory.description }}</p>
+          </div>
+        </header>
 
     <!-- Theme Toggle -->
-    <section class="settings-section">
+    <section class="settings-section" v-show="activeCategory === 'appearance'">
       <h2 class="section-title">外观</h2>
       <div class="setting-row">
         <div class="setting-label">
           <Icon icon="mdi:theme-light-dark" class="setting-icon" />
           主题模式
         </div>
-        <button class="theme-toggle" @click="store.toggleTheme()">
-          <Icon :icon="store.theme === 'dark' ? 'mdi:weather-night' : 'mdi:weather-sunny'" />
-          {{ store.theme === 'dark' ? '深色' : '浅色' }}
-        </button>
+        <div class="theme-options" role="group" aria-label="主题模式">
+          <button class="theme-toggle" :aria-pressed="store.themePreference === 'system'" @click="store.setThemePreference('system')"><Icon icon="mdi:monitor" />跟随系统</button>
+          <button class="theme-toggle" :aria-pressed="store.themePreference === 'dark'" @click="store.setThemePreference('dark')"><Icon icon="mdi:weather-night" />深色</button>
+          <button class="theme-toggle" :aria-pressed="store.themePreference === 'light'" @click="store.setThemePreference('light')"><Icon icon="mdi:weather-sunny" />浅色</button>
+        </div>
+      </div>
+      <div class="accent-setting">
+        <h3 class="accent-title"><Icon icon="mdi:palette-outline" aria-hidden="true" />主题色</h3>
+        <p class="accent-hint">选择按钮、选中状态和进度条的强调色，支持预设颜色或自定义色值。</p>
+        <div class="accent-presets" role="group" aria-label="预设主题色">
+          <button
+            v-for="preset in ACCENT_PRESETS"
+            :key="preset.color"
+            type="button"
+            class="accent-preset"
+            :class="{ selected: store.accentColor === preset.color }"
+            :aria-pressed="store.accentColor === preset.color"
+            :aria-label="preset.name"
+            @click="chooseAccent(preset.color)"
+          >
+            <span class="accent-swatch" :style="{ background: preset.color, color: accentTokens(preset.color)['--color-on-primary'] }">
+              <Icon v-if="store.accentColor === preset.color" icon="mdi:check" aria-hidden="true" />
+            </span>
+            <span>{{ preset.name }}</span>
+          </button>
+        </div>
+        <div class="accent-custom">
+          <AccentColorPicker :model-value="store.accentColor" @update:model-value="chooseAccent" />
+          <button type="button" class="accent-reset" @click="chooseAccent(DEFAULT_ACCENT)">恢复默认</button>
+        </div>
+        <div class="accent-save-row">
+          <button type="button" class="btn-primary" :disabled="accentSaving || !accentDirty" @click="saveAccent">{{ accentSaving ? '保存中…' : '保存' }}</button>
+          <span>{{ accentDirty ? '有未保存的修改' : '已保存' }}</span>
+        </div>
+        <p v-if="accentSaveError" class="accent-feedback invalid" aria-live="polite">{{ accentSaveError }}</p>
       </div>
     </section>
 
     <!-- Account: own password change -->
-    <section class="settings-section">
+    <section v-if="!session.isGuest.value" class="settings-section" v-show="activeCategory === 'account'">
       <h2 class="section-title">账户</h2>
       <div class="account-info-card">
         <div class="account-row">
@@ -51,14 +119,14 @@
       <PersonalNeteaseAccount v-if="providerOn('netease') && !session.isGuest.value" />
     </section>
 
-    <BotManagement v-if="can('bot.manage')" />
+    <BotManagement v-if="can('bot.manage')" v-show="activeCategory === 'bots'" />
 
     <!-- Jellyfin — optional self-hosted music source. Admin-configured
          connection (server URL + credentials), no QR flow. The card stays
          visible even while the source is disabled: the enable toggle below is
          the only UI that flips its enabledProviders membership, so hiding the
          card would leave no way to turn Jellyfin on. -->
-    <section v-if="can('platform.auth')" class="settings-section">
+    <section v-if="can('platform.auth')" class="settings-section" v-show="activeCategory === 'music'">
       <h2 class="section-title">Jellyfin 音乐库（可选）</h2>
 
       <div class="account-card">
@@ -160,7 +228,7 @@
 
     <!-- Music Account - QR Code Login (platform auth) requires platform.auth.
          Cards for sources disabled via enabledProviders are hidden. -->
-    <section v-if="can('platform.auth') && (providerOn('netease') || providerOn('qq') || providerOn('bilibili') || providerOn('kugou'))" class="settings-section">
+    <section v-if="can('platform.auth') && (providerOn('netease') || providerOn('qq') || providerOn('bilibili') || providerOn('kugou'))" class="settings-section" v-show="activeCategory === 'music'">
       <h2 class="section-title">音乐账号</h2>
 
       <!-- NetEase -->
@@ -446,7 +514,7 @@
     <!-- Default music source (issue #126): the source used by chat commands
          (!play/!add …) and the WebUI when no platform flag is given. Saving is a
          global bot setting, so gate on bot.manage like the other behavior rows. -->
-    <section v-if="can('bot.manage')" class="settings-section">
+    <section v-if="can('bot.manage')" class="settings-section" v-show="activeCategory === 'playback'">
       <h2 class="section-title">默认音源</h2>
       <p class="profile-section-hint">
         设置不带音源参数时（如聊天里的 <code>!play 歌名</code> 或网页搜索）默认使用的音源。
@@ -474,7 +542,7 @@
     </section>
 
     <!-- Spotify (Connect) playback via librespot — requires platform.auth -->
-    <section v-if="can('platform.auth')" class="settings-section">
+    <section v-if="can('platform.auth')" class="settings-section" v-show="activeCategory === 'music'">
       <h2 class="section-title">Spotify 播放（实验性）</h2>
       <p class="spotify-disclaimer">{{ SPOTIFY_DISCLAIMER }}</p>
 
@@ -574,7 +642,7 @@
     </section>
 
     <!-- Audio Quality requires quality -->
-    <section v-if="can('quality')" class="settings-section">
+    <section v-if="can('quality')" class="settings-section" v-show="activeCategory === 'playback'">
       <h2 class="section-title">音质设置</h2>
       <div v-if="providerOn('jellyfin')" class="setting-row">
         <div class="setting-label">
@@ -615,7 +683,7 @@
     </section>
 
     <!-- Command Prefix -->
-    <section class="settings-section">
+    <section v-if="!session.isGuest.value" class="settings-section" v-show="activeCategory === 'commands'">
       <h2 class="section-title">命令设置</h2>
       <div class="setting-row">
         <div class="setting-label">
@@ -630,7 +698,7 @@
     </section>
 
     <!-- Idle Timeout -->
-    <section v-if="can('bot.manage')" class="settings-section">
+    <section v-if="can('bot.manage')" class="settings-section" v-show="activeCategory === 'playback'">
       <h2 class="section-title">行为设置</h2>
       <div class="setting-row">
         <div class="setting-label">
@@ -771,9 +839,9 @@
     </section>
 
     <!-- Guest Mode (admin only) -->
-    <section v-if="session.isAdmin.value" class="settings-section">
+    <section v-if="session.isAdmin.value" class="settings-section" v-show="activeCategory === 'access'">
       <h2 class="section-title">游客模式</h2>
-      <p class="profile-section-hint">开启后，访客无需登录即可进入并点歌（默认关闭）。游客永远无法查看或修改设置。下面逐项决定游客可用的能力。</p>
+      <p class="profile-section-hint">开启后，访客无需登录即可进入并点歌（默认关闭）。游客仅可调整个人外观，无法查看或修改管理设置。下面逐项决定游客可用的能力。</p>
 
       <label class="profile-toggle behavior-toggle">
         <div class="profile-toggle-text">
@@ -820,7 +888,7 @@
     </section>
 
     <!-- Command Permissions (admin only) -->
-    <section v-if="session.isAdmin.value" class="settings-section">
+    <section v-if="session.isAdmin.value" class="settings-section" v-show="activeCategory === 'commands'">
       <h2 class="section-title">命令权限</h2>
       <p class="profile-section-hint">
         限制谁能在 TeamSpeak 聊天里运行管理类命令（stop / clear / remove / move / vol / mode）。
@@ -837,7 +905,7 @@
     </section>
 
     <!-- Bot Profile (TeamSpeak Behavior) -->
-    <section v-if="can('bot.manage')" class="settings-section">
+    <section v-if="can('bot.manage')" class="settings-section" v-show="activeCategory === 'bots'">
       <h2 class="section-title">机器人 Profile（TeamSpeak 行为）</h2>
       <p class="profile-section-hint">镜像机器人的头像和歌曲信息跟随原机器人，请配置原机器人的 Profile。控制 bot 在 TeamSpeak 上自动同步歌曲信息的方式。⚠️ 标记的项会触发频道里所有人的提示音。</p>
       <div v-if="store.bots.length === 0" class="empty-hint">还没有机器人，先在上面创建一个。</div>
@@ -890,7 +958,7 @@
     </section>
 
     <!-- User Management -->
-    <section v-if="session.isAdmin.value" class="settings-section">
+    <section v-if="session.isAdmin.value" class="settings-section" v-show="activeCategory === 'access'">
       <h2 class="section-title">用户管理</h2>
       <div class="user-list">
         <div v-for="u in userList" :key="u.id" class="user-row-wrap">
@@ -1023,7 +1091,7 @@
     </section>
 
     <!-- API Keys -->
-    <section class="settings-section">
+    <section v-if="!session.isGuest.value" class="settings-section" v-show="activeCategory === 'account'">
       <h2 class="section-title">API 密钥</h2>
       <p class="apikey-hint">
         通过 API Key 调用本机的 REST API（请求头 <code>Authorization: Bearer</code> 或 <code>X-API-Key</code>）。
@@ -1077,7 +1145,7 @@
     </section>
 
     <!-- Audit Log -->
-    <section v-if="session.isAdmin.value" class="settings-section">
+    <section v-if="session.isAdmin.value" class="settings-section" v-show="activeCategory === 'audit'">
       <h2 class="section-title">
         操作审计
         <button class="audit-refresh-btn" @click="loadAudit" :disabled="auditLoading" title="刷新">
@@ -1094,20 +1162,24 @@
         </div>
       </div>
     </section>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { Icon } from '@iconify/vue';
 import axios from 'axios';
 import { isMirrorBot } from '../composables/mirrorBots.js';
 import BotManagement from '../components/BotManagement.vue';
 import CustomAvatarRow from '../components/CustomAvatarRow.vue';
+import AccentColorPicker from '../components/AccentColorPicker.vue';
 import PersonalNeteaseAccount from '../components/PersonalNeteaseAccount.vue';
 import QRCode from 'qrcode';
 import { usePlayerStore } from '../stores/player.js';
 import { useSession } from '../composables/useSession.js';
+import { ACCENT_PRESETS, DEFAULT_ACCENT, accentTokens, readGuestAccent } from '../styles/accent.js';
 import {
   buildSpotifyPayload,
   parseSpotifyRedirect,
@@ -1118,6 +1190,10 @@ import {
 } from '../composables/useSpotifySettings.js';
 
 const store = usePlayerStore();
+function chooseAccent(color: string) {
+  store.setAccentColor(color);
+  accentSaveError.value = '';
+}
 
 const neteaseCookie = ref('');
 const qqCookie = ref('');
@@ -1843,6 +1919,62 @@ async function updateProfile(botId: string, key: keyof ProfileConfig, value: boo
 // --- User Management ---
 const session = useSession();
 const { can } = session;
+const accentSaving = ref(false);
+const accentSaveError = ref('');
+const guestSavedAccent = ref(readGuestAccent());
+const accentDirty = computed(() => store.accentColor !==
+  (session.isGuest.value ? guestSavedAccent.value : session.currentUser.value?.accentColor ?? DEFAULT_ACCENT));
+async function saveAccent() {
+  if (accentSaving.value) return;
+  const color = store.accentColor;
+  chooseAccent(color);
+  accentSaving.value = true;
+  accentSaveError.value = '';
+  try {
+    if (session.isGuest.value) {
+      store.saveGuestAccentColor();
+      guestSavedAccent.value = color;
+    } else {
+      await session.saveAccentColor(color);
+    }
+  } catch (error) {
+    accentSaveError.value = (error as Error).message;
+  } finally {
+    accentSaving.value = false;
+  }
+}
+
+// Navigation mirrors section permissions; hidden sections keep their form state.
+const settingsCategories = [
+  { id: 'bots', title: '机器人', summary: '实例与 TeamSpeak 配置', icon: 'mdi:robot-outline', description: '创建和管理机器人实例，配置服务器连接与 TeamSpeak 展示行为。' },
+  { id: 'music', title: '音乐平台', summary: '平台登录与音乐库连接', icon: 'mdi:music-box-multiple-outline', description: '登录音乐平台，连接 Jellyfin 音乐库，或配置 Spotify 播放。' },
+  { id: 'playback', title: '播放与音质', summary: '音源、音质与播放行为', icon: 'mdi:tune-variant', description: '设置默认音乐来源、播放音质，以及闲置退出和语音压低等行为。' },
+  { id: 'commands', title: '聊天命令', summary: '命令前缀与使用权限', icon: 'mdi:console-line', description: '设置 TeamSpeak 聊天命令的触发前缀，以及命令使用权限。' },
+  { id: 'access', title: '用户与权限', summary: '成员管理与游客访问', icon: 'mdi:shield-account-outline', description: '管理成员账户和权限，设置游客可以访问和操作的功能。' },
+  { id: 'account', title: '个人账户', summary: '信息、密码与 API 密钥', icon: 'mdi:account-circle-outline', description: '查看账户信息、修改密码，以及管理个人音乐账号和 API 密钥。' },
+  { id: 'appearance', title: '外观', summary: '主题模式与自定义强调色', icon: 'mdi:palette-outline', description: '选择适合你的主题模式和强调色，让日常使用更舒适。' },
+  { id: 'audit', title: '操作审计', summary: '操作记录与变更追踪', icon: 'mdi:clipboard-text-clock-outline', description: '查看账户与管理操作记录，了解谁在什么时间进行了变更。' },
+] as const;
+type SettingsCategoryId = typeof settingsCategories[number]['id'];
+const categoryHeader = ref<HTMLElement | null>(null);
+const visibleCategories = computed(() => settingsCategories.filter((category) => {
+  if (session.isGuest.value) return category.id === 'appearance';
+  if (category.id === 'bots') return can('bot.manage');
+  if (category.id === 'music') return can('platform.auth');
+  if (category.id === 'playback') return can('bot.manage') || can('quality');
+  if (category.id === 'access' || category.id === 'audit') return session.isAdmin.value;
+  return true;
+}));
+const activeCategory = ref<SettingsCategoryId>(visibleCategories.value[0]!.id);
+const currentCategory = computed(() => visibleCategories.value.find((category) => category.id === activeCategory.value) ?? visibleCategories.value[0]!);
+watch(visibleCategories, (categories) => {
+  if (!categories.some((category) => category.id === activeCategory.value)) activeCategory.value = categories[0]!.id;
+});
+async function selectCategory(id: SettingsCategoryId) {
+  activeCategory.value = id;
+  await nextTick();
+  categoryHeader.value?.focus({ preventScroll: true });
+}
 
 // --- Own password change (available to all authenticated users) ---
 const ownPw = reactive({ old: '', new: '', confirm: '' });
@@ -2241,6 +2373,7 @@ function auditActionClass(action: string): string {
 }
 
 onMounted(() => {
+  if (session.isGuest.value) return;
   store.fetchBots(); // Refresh bot status on page visit
   checkAuthStatus();
   loadQuality();
@@ -2263,6 +2396,157 @@ onUnmounted(() => {
 </script>
 
 <style lang="scss" scoped>
+.accent-setting { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--border-color); }
+.accent-title { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
+.accent-title svg { font-size: 18px; color: var(--text-secondary); }
+.accent-hint { margin: 8px 0 16px; font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+.accent-presets { display: flex; gap: 10px; flex-wrap: wrap; }
+.accent-preset {
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  padding: 10px; min-width: 68px; border: 1px solid transparent;
+  border-radius: var(--radius-md); background: transparent;
+  color: var(--text-secondary); font-size: 12px; cursor: pointer;
+  &:hover { background: var(--hover-bg); }
+  &.selected { border-color: var(--color-primary); background: var(--color-primary-10); color: var(--text-primary); }
+  &:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+}
+.accent-swatch { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; font-size: 20px; border: 1px solid var(--border-color); }
+.accent-custom { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 20px; }
+.accent-reset { font-size: 12px; color: var(--text-secondary); padding: 8px 0; cursor: pointer; &:hover { color: var(--text-primary); } }
+.accent-feedback { margin: 12px 0 0; font-size: 12px; color: var(--text-tertiary); &.invalid { color: #e26a6a; } }
+.accent-save-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 20px; font-size: 12px; color: var(--text-secondary); }
+.accent-save-row button:disabled { opacity: 0.5; cursor: default; }
+
+.settings-page {
+  overflow-anchor: none;
+  max-width: 1240px;
+  margin: 0 auto;
+}
+
+.settings-header { margin-bottom: 28px; }
+.settings-eyebrow {
+  margin-bottom: 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+.settings-intro {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.settings-layout {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+}
+.settings-sidebar {
+  position: sticky;
+  top: calc(var(--navbar-height) + 24px);
+  max-height: calc(100dvh - var(--navbar-height) - var(--player-height) - 48px);
+  overflow-y: auto;
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+}
+.settings-nav-label {
+  padding: 8px 12px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  letter-spacing: 1px;
+}
+.settings-nav { display: flex; flex-direction: column; gap: 4px; }
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+
+  &:hover { background: var(--hover-bg); color: var(--text-primary); }
+  &:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  &.active {
+    background: var(--color-primary-10);
+    border-color: var(--color-primary-15);
+    color: var(--color-primary);
+    .settings-nav-description { color: var(--text-secondary); }
+    .settings-nav-arrow { opacity: 1; }
+  }
+}
+.settings-nav-icon { font-size: 22px; flex-shrink: 0; }
+.settings-nav-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; gap: 5px; }
+.settings-nav-title { font-size: 14px; font-weight: 600; }
+.settings-nav-description { font-size: 11px; line-height: 1.5; color: var(--text-tertiary); }
+.settings-nav-arrow { font-size: 18px; opacity: 0; flex-shrink: 0; }
+.settings-content { min-width: 0; }
+.category-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 0 24px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border-color);
+  scroll-margin-top: calc(var(--navbar-height) + 24px);
+  outline: none;
+
+  h2 { font-size: 22px; font-weight: 700; margin: 0; }
+  p { margin: 6px 0 0; font-size: 13px; color: var(--text-secondary); line-height: 1.6; }
+}
+.category-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  font-size: 25px;
+  border-radius: 12px;
+  background: var(--color-primary-10);
+  color: var(--color-primary);
+}
+
+@media (max-width: 1100px) and (min-width: 769px) {
+  .settings-layout { grid-template-columns: 230px minmax(0, 1fr); gap: 24px; }
+  .settings-nav-item { gap: 8px; padding: 10px 8px; }
+}
+@media (max-width: 768px) {
+  .settings-header { margin-bottom: 20px; }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .settings-sidebar { position: static; max-height: none; padding: 8px; overflow: hidden; }
+  .settings-nav-label { padding: 4px 8px 10px; }
+  .settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 2px 2px 6px;
+    scrollbar-width: none;
+    &::-webkit-scrollbar { display: none; }
+  }
+  .settings-nav-item { flex: 0 0 auto; width: auto; gap: 8px; padding: 10px 12px; }
+  .settings-nav-title { white-space: nowrap; }
+  .settings-nav-description, .settings-nav-arrow { display: none; }
+  .settings-nav-icon { font-size: 19px; }
+  .category-header {
+    gap: 12px;
+    padding-bottom: 20px;
+    margin-bottom: 20px;
+    scroll-margin-top: calc(var(--navbar-height) + 136px);
+  }
+  .category-header h2 { font-size: 20px; }
+}
+
 .back-btn {
   display: flex;
   align-items: center;
@@ -2277,13 +2561,14 @@ onUnmounted(() => {
 .page-title {
   font-size: 28px;
   font-weight: 800;
-  margin-bottom: 32px;
+  margin-bottom: 0;
 }
 
 .settings-section {
-  margin-bottom: 36px;
+  margin-bottom: 20px;
   padding: 24px;
   background: var(--bg-card);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
 }
 
@@ -2318,6 +2603,7 @@ onUnmounted(() => {
   opacity: 0.6;
 }
 
+.theme-options { display: flex; flex-wrap: wrap; gap: 6px; }
 .theme-toggle {
   display: flex;
   align-items: center;
@@ -2328,7 +2614,8 @@ onUnmounted(() => {
   font-size: 13px;
   font-weight: 600;
   transition: all var(--transition-fast);
-  &:hover { background: var(--color-primary); color: white; }
+  &:hover { background: var(--color-primary); color: var(--color-on-primary); }
+  &[aria-pressed='true'] { background: var(--color-primary-15); color: var(--color-primary); box-shadow: inset 0 0 0 1px var(--color-primary); }
 }
 
 // Bot management
@@ -2673,7 +2960,7 @@ onUnmounted(() => {
 .btn-primary {
   padding: 10px 20px;
   background: var(--color-primary);
-  color: white;
+  color: var(--color-on-primary);
   border-radius: var(--radius-sm);
   font-size: 13px;
   font-weight: 600;
@@ -2690,7 +2977,7 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 600;
   transition: all var(--transition-fast);
-  &:hover { background: var(--color-primary); color: white; }
+  &:hover { background: var(--color-primary); color: var(--color-on-primary); }
 }
 
 .btn-edit {
@@ -2722,6 +3009,53 @@ onUnmounted(() => {
   margin-top: 20px;
   padding-top: 16px;
   border-top: 1px solid var(--border-color);
+}
+
+.create-instance-layout {
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+.create-instance-avatar {
+  padding: 18px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  text-align: center;
+  .create-avatar-title { margin-bottom: 18px; font-size: 13px; font-weight: 600; }
+  .create-avatar-title span { margin-left: 4px; font-size: 11px; font-weight: 400; color: var(--text-tertiary); }
+  :deep(.avatar-upload) { align-items: center; gap: 12px; }
+  :deep(.preview) { width: 120px; height: 120px; border: 1px solid var(--border-color); }
+  :deep(.preview.empty svg) { font-size: 64px; }
+  :deep(.hint) { font-size: 11px; line-height: 1.6; }
+}
+
+.create-instance-fields { min-width: 0; }
+.create-field-section {
+  margin-bottom: 22px;
+  h4 { margin: 0 0 12px; font-size: 13px; font-weight: 600; }
+  .form-group { min-width: 0; margin: 0; }
+  .input { width: 100%; min-width: 0; box-sizing: border-box; }
+}
+.create-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+.create-server-grid { grid-template-columns: minmax(0, 1fr) 100px; }
+.create-field-wide { grid-column: 1 / -1; }
+.create-field-hint { margin: 8px 0 0; font-size: 11px; color: var(--text-tertiary); }
+.create-instance-actions { display: flex; justify-content: flex-end; padding-top: 16px; border-top: 1px solid var(--border-color); }
+
+@media (max-width: 1100px) and (min-width: 769px) {
+  .create-instance-layout { grid-template-columns: 144px minmax(0, 1fr); gap: 20px; }
+  .create-field-grid { grid-template-columns: minmax(0, 1fr); }
+  .create-server-grid { grid-template-columns: minmax(0, 1fr) 90px; }
+}
+
+@media (max-width: 600px) {
+  .create-instance-layout { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .create-instance-avatar { justify-self: start; width: 168px; box-sizing: border-box; }
+  .create-field-grid { grid-template-columns: minmax(0, 1fr); }
+  .create-server-grid { grid-template-columns: minmax(0, 1fr) 86px; gap: 12px; }
 }
 
 .form-group {
@@ -3033,7 +3367,7 @@ onUnmounted(() => {
 .user-name { font-weight: 500; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
 .user-self-badge {
   font-size: 11px; padding: 2px 6px; border-radius: 4px;
-  background: var(--color-primary); color: #fff;
+  background: var(--color-primary); color: var(--color-on-primary);
 }
 .user-created { font-size: 12px; color: var(--text-secondary); }
 .user-actions { display: flex; gap: 8px; }

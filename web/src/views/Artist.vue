@@ -322,7 +322,7 @@ watch(() => `${route.params.id}|${route.query.platform ?? ''}`, loadArtist);
 
 .play-all-btn {
   background: var(--color-primary);
-  color: white;
+  color: var(--color-on-primary);
   &:not(:disabled):hover { transform: scale(1.04); }
   &:not(:disabled):active { transform: scale(0.96); }
 }

@@ -734,7 +734,7 @@ onMounted(async () => {
   padding: 8px 14px;
   border-radius: var(--radius-sm);
   background: var(--color-primary);
-  color: #fff;
+  color: var(--color-on-primary);
   font-size: 13px;
   font-weight: var(--fw-semi);
   cursor: pointer;
@@ -1017,7 +1017,7 @@ onMounted(async () => {
 
   &.active {
     color: var(--color-primary);
-    background: rgba(51, 94, 234, 0.12);
+    background: var(--color-primary-12);
   }
 }
 
@@ -1047,7 +1047,7 @@ onMounted(async () => {
 
   &.active {
     background: var(--color-primary);
-    color: #fff;
+    color: var(--color-on-primary);
     .tab-count { opacity: 0.85; }
   }
 }
@@ -1088,7 +1088,7 @@ onMounted(async () => {
 
   &:hover:not(:disabled) {
     color: var(--color-primary);
-    background: rgba(51, 94, 234, 0.12);
+    background: var(--color-primary-12);
   }
 
   &:disabled {

@@ -175,7 +175,7 @@ input:disabled, select:disabled { opacity: .6; cursor: not-allowed; }
 .checkbox-label { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
 .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
 button { padding: 10px 16px; background: var(--hover-bg); border-radius: var(--radius-sm); font-size: 13px; }
-button.primary { background: var(--color-primary); color: white; }
+button.primary { background: var(--color-primary); color: var(--color-on-primary); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 .error { color: #e26a6a; font-size: 13px; line-height: 1.5; }
 </style>

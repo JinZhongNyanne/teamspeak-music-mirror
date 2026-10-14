@@ -217,6 +217,9 @@ function migrateSchema(db: Database.Database): void {
   if (!userColNames.includes("role")) {
     db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'");
   }
+  if (!userColNames.includes("accentColor")) {
+    db.exec("ALTER TABLE users ADD COLUMN accentColor TEXT NOT NULL DEFAULT '#335eea'");
+  }
 
   const historyColumns = db.prepare("PRAGMA table_info(play_history)").all() as Array<{ name: string }>;
   const historyColNames = historyColumns.map((c) => c.name);

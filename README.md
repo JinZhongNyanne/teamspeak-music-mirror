@@ -273,3 +273,5 @@ FFMPEG_BIN=/usr/bin/ffmpeg npm test
 原始功能说明保留在 [docs/UPSTREAM.md](docs/UPSTREAM.md) 供历史/平台深度配置参考；[docs/API.md](docs/API.md)、[docs/MIRROR.md](docs/MIRROR.md)、[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 是详细补充。运行数据、账号、身份与秘密不属于公开源码。
 
 B站部分歌曲显示播放但无声的 CDN 兼容问题与验证说明见 [Bilibili CDN 修复记录](docs/BILIBILI-CDN-20261011.md)。
+
+上游设置分类、系统主题和账户主题色同步已与镜像管理整合；B站新 CDN 修复和 QQ 歌词翻译修复继续保留。版本对比、合并兼容与演示页面见 [上游合并记录](docs/UPSTREAM-MERGE-20261015.md)。

@@ -182,7 +182,25 @@ export function createSessionRouter(
       capabilities: [...ctx.capabilities],
       bots: ctx.bots === "all" ? "all" : [...ctx.bots],
       guest: ctx.guest ?? null,
+      accentColor: user.role === "guest" ? null : users.getAccentColor(user.id),
     });
+  });
+
+  router.put("/preferences", requireAuthInline, (req, res) => {
+    if (req.user!.role === "guest") {
+      res.status(403).json({ error: "guests store appearance preferences locally" });
+      return;
+    }
+    const color = req.body?.accentColor;
+    if (typeof color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(color)) {
+      res.status(400).json({ error: "invalid accent color" });
+      return;
+    }
+    if (!users.setAccentColor(req.user!.id, color.toLowerCase())) {
+      res.status(404).json({ error: "user not found" });
+      return;
+    }
+    res.json({ accentColor: color.toLowerCase() });
   });
 
   router.post("/change-password", requireAuthInline, async (req, res) => {

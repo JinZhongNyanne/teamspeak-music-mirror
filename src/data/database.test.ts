@@ -37,11 +37,33 @@ describe("database", () => {
 
     const userCols = botDb.db.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
     const userColNames = userCols.map((c) => c.name).sort();
-    expect(userColNames).toEqual(["createdAt", "id", "passwordHash", "role", "updatedAt", "username"]);
+    expect(userColNames).toEqual(["accentColor", "createdAt", "id", "passwordHash", "role", "updatedAt", "username"]);
 
     const sessionCols = botDb.db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
     const sessionColNames = sessionCols.map((c) => c.name).sort();
     expect(sessionColNames).toEqual(["createdAt", "expiresAt", "id", "lastSeenAt", "userId"]);
+  });
+
+  it("migrates existing accounts and preserves their accent across database reopen", async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tsmb-accent-'));
+    const path = join(dir, 'test.db');
+    let db = createDatabase(path);
+    try {
+      const user = await createUserStore(db.db).createUser('alice', 'test-password', 'member');
+      db.db.exec('ALTER TABLE users DROP COLUMN accentColor');
+      db.close();
+      db = createDatabase(path);
+      const users = createUserStore(db.db);
+      expect(users.getAccentColor(user.id)).toBe('#335eea');
+      users.setAccentColor(user.id, '#0891b2');
+      db.close();
+      db = createDatabase(path);
+      expect(createUserStore(db.db).getAccentColor(user.id)).toBe('#0891b2');
+      expect(createUserStore(db.db).findById(user.id)?.username).toBe('alice');
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("creates user_audit table on init", () => {

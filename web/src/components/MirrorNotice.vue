@@ -21,7 +21,7 @@ const { source, goToSource } = useMirrorSourceNavigation();
 <style scoped lang="scss">
 .mirror-notice { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px; margin-bottom: 24px; background: var(--color-primary-10); border: 1px solid var(--border-color); border-radius: var(--radius-md); font-size: 13px; }
 p { margin: 6px 0 0; color: var(--text-secondary); line-height: 1.5; }
-button { padding: 10px 14px; border-radius: var(--radius-sm); background: var(--color-primary); color: white; flex-shrink: 0; }
+button { padding: 10px 14px; border-radius: var(--radius-sm); background: var(--color-primary); color: var(--color-on-primary); flex-shrink: 0; }
 .access-hint { font-size: 12px; color: var(--text-tertiary); }
 @media (max-width: 768px) { .mirror-notice { align-items: flex-start; flex-direction: column; gap: 12px; } }
 </style>
