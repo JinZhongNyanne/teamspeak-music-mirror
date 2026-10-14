@@ -55,6 +55,19 @@ function isArtistAlbum(a: any, artistId: string): boolean {
   );
 }
 
+/** The embedded QQ API decodes `lyric` but leaves `trans` Base64-encoded.
+ * Accept both that response and providers that already return plain LRC. */
+function qqLyricText(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const encoded = value.replace(/\s+/g, "");
+  if (!encoded || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return value;
+  const bytes = Buffer.from(encoded, "base64");
+  // Buffer's decoder silently ignores malformed input; require a round trip.
+  if (bytes.toString("base64").replace(/=+$/, "") !== encoded.replace(/=+$/, "")) return value;
+  const decoded = bytes.toString("utf8");
+  return /(?:^|\r?\n)\[\d{2}:\d{2}\.\d{2,3}\]/.test(decoded) ? decoded : value;
+}
+
 /** Assembling a QQ singer's full catalogue costs one album-song request per
  *  album, so the merged list is memoised per singer for a while. */
 const ARTIST_CATALOG_TTL_MS = 10 * 60 * 1000;
@@ -758,12 +771,31 @@ export class QQMusicProvider implements MusicProvider {
   }
 
   async getLyrics(songId: string): Promise<LyricLine[]> {
+    // The classic endpoint currently omits translations. `trans_t` is a
+    // timestamp, not the request switch: explicitly request `trans: 1`.
+    try {
+      const res = await qqMusicuApi.post("/cgi-bin/musicu.fcg", this.buildMusicuPayload(
+        "music.musichallSong.PlayLyricInfo", "GetPlayLyricInfo", {
+          songMID: songId, songID: 0,
+          trans: 1, trans_t: 0,
+          qrc: 0, qrc_t: 0, roma: 0, roma_t: 0,
+          crypt: 0, lrc_t: 0, interval: 0,
+        }
+      ), { headers: this.directCookieHeaders });
+      const result = res.data?.req_0;
+      if (res.data?.code === 0 && result?.code === 0) {
+        const lines = parseLyrics(qqLyricText(result.data?.lyric), qqLyricText(result.data?.trans));
+        if (lines.length) return lines;
+      }
+    } catch {
+      // Keep the existing endpoint as a fallback for upstream failures.
+    }
     const res = await this.api.get("/getLyric", {
       params: { songmid: songId, ...this.cookieParams },
     });
     return parseLyrics(
-      res.data?.response?.lyric ?? res.data?.lyric ?? "",
-      res.data?.response?.trans ?? res.data?.trans ?? ""
+      qqLyricText(res.data?.response?.lyric ?? res.data?.lyric),
+      qqLyricText(res.data?.response?.trans ?? res.data?.trans)
     );
   }
 

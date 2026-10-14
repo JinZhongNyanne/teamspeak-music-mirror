@@ -637,3 +637,86 @@ describe("QQMusicProvider.getArtistAllSongs (album aggregation)", () => {
     expect(full.total).toBe(2);
   });
 });
+
+
+describe("QQ lyrics translation", () => {
+  const original = "[00:01.00]original one\n[00:02.50]original two";
+  const translated = "[00:01.00]译文一\n[00:02.50]译文二";
+  const expected = [
+    { time: 1, text: "original one", translation: "译文一" },
+    { time: 2.5, text: "original two", translation: "译文二" },
+  ];
+  beforeEach(() => {
+    mockGet.mockReset();
+    mockPost.mockReset();
+    mockPost.mockRejectedValue(new Error("musicu unavailable"));
+  });
+
+  it("requests translations from musicu and decodes both returned fields", async () => {
+    mockPost.mockResolvedValue({ data: { code: 0, req_0: { code: 0, data: {
+      lyric: Buffer.from(original).toString("base64"),
+      trans: Buffer.from(translated).toString("base64"),
+    } } } });
+    const provider = new QQMusicProvider("http://localhost");
+    const fixtureCookie = "uin=123; p_skey=test-only"; // Deliberately fake credentials.
+    provider.setCookie(fixtureCookie);
+    expect(await provider.getLyrics("song-mid")).toEqual(expected);
+    expect(mockPost).toHaveBeenCalledWith("/cgi-bin/musicu.fcg", expect.objectContaining({
+      req_0: { module: "music.musichallSong.PlayLyricInfo", method: "GetPlayLyricInfo",
+        param: expect.objectContaining({ songMID: "song-mid", songID: 0, trans: 1, crypt: 0 }) },
+    }), { headers: { Cookie: fixtureCookie } });
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { code: -1, req_0: { code: 0, data: { lyric: original, trans: translated } } },
+    { code: 0, req_0: { code: -1, data: { lyric: original, trans: translated } } },
+    { code: 0, req_0: { code: 0, data: {} } },
+  ])("falls back to the embedded API on business errors or missing timed lyrics", async (data) => {
+    mockPost.mockResolvedValue({ data });
+    mockGet.mockResolvedValue({ data: { response: { lyric: original, trans: translated } } });
+    expect(await new QQMusicProvider("http://localhost").getLyrics("song-mid")).toEqual(expected);
+    expect(mockGet).toHaveBeenCalledWith("/getLyric", expect.any(Object));
+  });
+
+  it("keeps musicu original lyrics when a track has no translation", async () => {
+    mockPost.mockResolvedValue({ data: { code: 0, req_0: { code: 0, data: {
+      lyric: Buffer.from(original).toString("base64"), trans: "",
+    } } } });
+    const lines = await new QQMusicProvider("http://localhost").getLyrics("song-mid");
+    expect(lines.map(line => line.text)).toEqual(["original one", "original two"]);
+    expect(lines.every(line => line.translation === undefined)).toBe(true);
+    expect(mockGet).not.toHaveBeenCalled();
+  });
+
+  it("merges the embedded QQ API's encoded translation with its decoded original", async () => {
+    mockGet.mockResolvedValue({ data: { response: {
+      lyric: original,
+      trans: Buffer.from(translated).toString("base64"),
+    } } });
+    expect(await new QQMusicProvider("http://localhost").getLyrics("song-mid")).toEqual(expected);
+  });
+
+  it("keeps already decoded translation text", async () => {
+    mockGet.mockResolvedValue({ data: { response: { lyric: original, trans: translated } } });
+    expect(await new QQMusicProvider("http://localhost").getLyrics("song-mid")).toEqual(expected);
+  });
+
+  it("accepts unwrapped responses with both fields encoded", async () => {
+    mockGet.mockResolvedValue({ data: {
+      lyric: Buffer.from(original).toString("base64"),
+      trans: Buffer.from(translated).toString("base64"),
+    } });
+    expect(await new QQMusicProvider("http://localhost").getLyrics("song-mid")).toEqual(expected);
+  });
+
+  it.each([undefined, "", "not!base64", { invalid: true }, Buffer.from("not a lyric").toString("base64")])(
+    "keeps original lyrics when translation is missing or unusable: %j", async (trans) => {
+      mockGet.mockResolvedValue({ data: { response: { lyric: original, trans } } });
+      expect(await new QQMusicProvider("http://localhost").getLyrics("song-mid")).toEqual([
+        { time: 1, text: "original one", translation: undefined },
+        { time: 2.5, text: "original two", translation: undefined },
+      ]);
+    },
+  );
+});
