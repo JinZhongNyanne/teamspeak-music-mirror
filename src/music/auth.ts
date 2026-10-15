@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 /** Platforms with a persisted credential blob. For jellyfin the "cookie" is a
  *  JSON string carrying the access token / userId / deviceId (see jellyfin.ts). */
@@ -18,11 +19,19 @@ export function createCookieStore(cookieDir: string): CookieStore {
   return {
     save(platform: CookiePlatform, cookie: string): void {
       const filePath = path.join(cookieDir, `${platform}.json`);
-      fs.writeFileSync(
-        filePath,
-        JSON.stringify({ cookie, updatedAt: new Date().toISOString() }),
-        { encoding: "utf-8", mode: 0o600 }
-      );
+      // Replace atomically so a restart during automatic renewal cannot leave
+      // a truncated credential file. Temp files stay private and are cleaned.
+      const temporary = `${filePath}.${randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(
+          temporary,
+          JSON.stringify({ cookie, updatedAt: new Date().toISOString() }),
+          { encoding: "utf-8", mode: 0o600, flag: "wx" }
+        );
+        fs.renameSync(temporary, filePath);
+      } finally {
+        fs.rmSync(temporary, { force: true });
+      }
     },
 
     load(platform: CookiePlatform): string {

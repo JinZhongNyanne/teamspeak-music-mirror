@@ -308,7 +308,7 @@
           <div class="account-info">
             <div class="account-name">QQ音乐</div>
             <div class="account-status" :class="{ logged: qqAuth.loggedIn }">
-              {{ qqAuth.loggedIn ? `已登录: ${qqAuth.nickname}` : '未登录' }}
+              {{ qqAuth.checkFailed ? '暂时无法验证登录状态，请稍后重试' : qqAuth.loggedIn ? `已登录: ${qqAuth.nickname}` : '未登录' }}
             </div>
           </div>
         </div>
@@ -1252,7 +1252,7 @@ const kugouLoginMode = ref<'qr' | 'cookie' | null>(null);
 
 // Auth status
 const neteaseAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
-const qqAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
+const qqAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '', checkFailed: false });
 const bilibiliAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const kugouAuth = reactive({ loggedIn: false, nickname: '', avatarUrl: '' });
 const jellyfinAuth = reactive({ loggedIn: false, nickname: '' });
@@ -1447,7 +1447,12 @@ async function checkAuthStatus() {
     axios.get('/api/auth/status', { params: { platform: 'jellyfin' } }),
   ]);
   if (nRes.status === 'fulfilled') Object.assign(neteaseAuth, nRes.value.data);
-  if (qRes.status === 'fulfilled') Object.assign(qqAuth, qRes.value.data);
+  if (qRes.status === 'fulfilled') {
+    Object.assign(qqAuth, qRes.value.data);
+    qqAuth.checkFailed = false;
+  } else {
+    qqAuth.checkFailed = true;
+  }
   if (bRes.status === 'fulfilled') Object.assign(bilibiliAuth, bRes.value.data);
   if (kRes.status === 'fulfilled') Object.assign(kugouAuth, kRes.value.data);
   if (jRes.status === 'fulfilled') {

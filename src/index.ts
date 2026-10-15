@@ -84,7 +84,20 @@ async function main() {
   const neteaseCookie = cookieStore.load("netease");
   if (neteaseCookie) neteaseProvider.setCookie(neteaseCookie);
   const qqCookie = cookieStore.load("qq");
+  qqProvider.setPersist((cookie) => {
+    cookieStore.save("qq", cookie);
+    logger.info({ platform: "qq" }, "Cookie renewed and persisted to disk");
+  });
   if (qqCookie) qqProvider.setCookie(qqCookie);
+  // The music key expires independently from the longer-lived QQ access token.
+  // Check once at boot and hourly, with provider-side due/backoff/single-flight
+  // guards; waiting for the settings page to be opened can miss the renewal.
+  const renewQqCookie = () => {
+    if (isProviderEnabled(config, "qq")) void qqProvider.refreshCookie();
+  };
+  renewQqCookie();
+  const qqCookieTimer = setInterval(renewQqCookie, 60 * 60 * 1000);
+  qqCookieTimer.unref();
   const bilibiliCookie = cookieStore.load("bilibili");
   if (bilibiliCookie) bilibiliProvider.setCookie(bilibiliCookie);
   const kugouCookie = cookieStore.load("kugou");
@@ -175,6 +188,7 @@ async function main() {
 
   const shutdown = () => {
     logger.info("Shutting down...");
+    clearInterval(qqCookieTimer);
     botManager.shutdown();
     webServer.stop();
     apiServer.stop();

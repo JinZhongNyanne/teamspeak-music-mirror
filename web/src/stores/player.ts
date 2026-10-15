@@ -844,7 +844,8 @@ export const usePlayerStore = defineStore('player', {
       const newAuth = {
         jellyfin: jfAuthRes.status === 'fulfilled' && !!jfAuthRes.value.data?.loggedIn,
         netease: neAuthRes.status === 'fulfilled' && !!neAuthRes.value.data?.loggedIn,
-        qq:      qqAuthRes.status === 'fulfilled' && !!qqAuthRes.value.data?.loggedIn,
+        qq:      has('qq') && (qqAuthRes.status === 'fulfilled'
+          ? !!qqAuthRes.value.data?.loggedIn : this.authStatus.qq),
         kugou:   kugouAuthRes.status === 'fulfilled' && !!kugouAuthRes.value.data?.loggedIn,
         spotify: spAuthRes.status === 'fulfilled' && !!spAuthRes.value.data?.loggedIn,
       };

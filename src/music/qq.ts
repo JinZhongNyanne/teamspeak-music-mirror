@@ -15,6 +15,7 @@ import type {
   ArtistSongPage,
 } from "./provider.js";
 import { parseLyrics } from "./netease.js";
+import { buildQqRefreshRequest, isQqRefreshDue, mergeQqRefreshResponse, parseQqCookie, qqCookieUin } from "./qq-auth.js";
 
 // Primary search client: u.y.qq.com/cgi-bin/musicu.fcg (JSON sub-request
 // batch). Was broken ca. 2026-05 due to two upstream API changes:
@@ -187,6 +188,11 @@ export class QQMusicProvider implements MusicProvider {
   private cookie = "";
   private quality = "exhigh";
   private radarPage = 1;
+  private persistCookie: ((cookie: string) => void) | null = null;
+  private refreshPending: { cookie: string; task: Promise<boolean> } | null = null;
+  private nextRefreshAt = 0;
+  private cookieVersion = 0;
+  private lastAuth: { at: number; status: AuthStatus } | null = null;
 
   constructor(baseUrl: string) {
     this.api = axios.create({
@@ -201,6 +207,46 @@ export class QQMusicProvider implements MusicProvider {
 
   getQuality(): string {
     return this.quality;
+  }
+
+  setPersist(persist: (cookie: string) => void): void {
+    this.persistCookie = persist;
+  }
+
+  /** Renew before the short-lived music key expires. Never erase credentials
+   * on failure, or let an old request overwrite a newer manual/QR login. */
+  async refreshCookie(force = false): Promise<boolean> {
+    const cookie = this.cookie;
+    if (this.refreshPending?.cookie === cookie) return this.refreshPending.task;
+    if (!cookie || Date.now() < this.nextRefreshAt || (!force && !isQqRefreshDue(cookie, Date.now()))) return false;
+    const payload = buildQqRefreshRequest(cookie);
+    if (!payload) return false;
+    const version = this.cookieVersion;
+    this.nextRefreshAt = Date.now() + 60 * 60 * 1000;
+    const task = (async () => {
+      try {
+        const response = await qqMusicuApi.post("/cgi-bin/musicu.fcg", payload, {
+          headers: { referer: "https://y.qq.com/", Cookie: cookie },
+        });
+        const renewed = mergeQqRefreshResponse(cookie, response.data, Date.now());
+        if (!renewed || this.cookieVersion !== version) return false;
+        // Persist first: a successful renewal must survive the next restart.
+        this.persistCookie?.(renewed);
+        this.cookie = renewed;
+        this.cookieVersion++;
+        this.nextRefreshAt = Date.now() + 12 * 60 * 60 * 1000;
+        return true;
+      } catch {
+        // Axios errors can include a credential-bearing request. Do not expose
+        // them to logs or callers; retain the old cookie and retry later.
+        return false;
+      }
+    })();
+    this.refreshPending = { cookie, task };
+    try { return await task; }
+    finally {
+      if (this.refreshPending?.task === task) this.refreshPending = null;
+    }
   }
 
   private get cookieParams(): Record<string, string> {
@@ -365,6 +411,7 @@ export class QQMusicProvider implements MusicProvider {
   }
 
   async getSongUrl(songId: string, quality?: string): Promise<SongUrlResult | null> {
+    await this.refreshCookie();
     try {
       const res = await this.api.get("/getMusicPlay", {
         params: { songmid: songId, quality: quality ?? this.quality, ...this.cookieParams },
@@ -840,7 +887,8 @@ export class QQMusicProvider implements MusicProvider {
     const body = res.data;
     if (body?.isOk === true) {
       const cookie: string = body.session?.cookie ?? "";
-      if (cookie) this.cookie = cookie;
+      if (typeof cookie !== "string" || !cookie.trim()) return "expired";
+      this.setCookie(cookie);
       return "confirmed";
     }
     if (body?.refresh === true) return "expired";
@@ -851,6 +899,9 @@ export class QQMusicProvider implements MusicProvider {
 
   setCookie(cookie: string): void {
     this.cookie = cookie;
+    this.cookieVersion++;
+    this.nextRefreshAt = 0;
+    this.lastAuth = null;
     // Reset radar pagination so a re-login (different account) starts from the
     // first page rather than inheriting the previous account's cursor.
     this.radarPage = 1;
@@ -862,32 +913,44 @@ export class QQMusicProvider implements MusicProvider {
 
   async getAuthStatus(): Promise<AuthStatus> {
     if (!this.cookie) return { loggedIn: false };
-    // /getUserAvatar in @sansenjian/qq-music-api 2.x is NOT registered on
-    // the main router; the real endpoint is /user/getUserAvatar, and even
-    // that just builds a static URL from a uin without validating the
-    // cookie against QQ. Round-trip through /user/getUserPlaylists which
-    // actually hits QQ Music with the cookie; if the upstream returns
-    // code=0, the cookie is valid.
-    //
-    // IMPORTANT: /user/getUserPlaylists requires `uin` as a query param —
-    // the library 400s with "缺少 uin 参数" otherwise. Parse it out of the
-    // cookie (uin=<qq>; comes after the various *uin prefixed names, which
-    // is why the regex anchors on a word boundary).
-    const uinMatch = /(?:^|; )uin=o?0?(\d+)/.exec(this.cookie);
-    const uin = uinMatch ? uinMatch[1] : "";
+    await this.refreshCookie();
+    const version = this.cookieVersion;
+    // Check the authenticated profile directly. The bundled playlist wrapper
+    // collapses QQ authentication errors into HTTP 502, losing the distinction
+    // between revoked credentials and a transient network outage.
+    const uin = qqCookieUin(this.cookie);
     if (!uin) return { loggedIn: false };
     try {
-      const res = await this.api.get("/user/getUserPlaylists", {
-        params: { uin, ...this.cookieParams },
+      const fields = parseQqCookie(this.cookie);
+      const res = await qqFavApi.get("https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg", {
+        params: {
+          uin, loginUin: uin, userid: uin, hostUin: 0, cid: 205360838,
+          reqfrom: 1, reqtype: 0, ct: 24, cv: 4747474, format: "json",
+          g_tk: computeGtk(fields.qqmusic_key || fields.qm_keyst || ""),
+        },
+        headers: { referer: "https://y.qq.com/", ...this.directCookieHeaders },
       });
-      if (res.data?.response?.code !== 0) return { loggedIn: false };
-      return {
+      if (version !== this.cookieVersion) throw new Error("QQ account changed during authentication check");
+      const code = res.data?.code;
+      if (code !== 0) {
+        // Explicit authentication rejection is authoritative; HTTP/network or
+        // unknown API errors are not evidence that the cookie was revoked.
+        if (code === 1000 || code === 104400 || code === 104401) {
+          this.lastAuth = null;
+          return { loggedIn: false };
+        }
+        throw new Error("QQ authentication check temporarily unavailable");
+      }
+      const status = {
         loggedIn: true,
         nickname: `QQ ${uin}`,
         avatarUrl: `https://q.qlogo.cn/headimg_dl?dst_uin=${uin}&spec=100`,
       };
+      this.lastAuth = { at: Date.now(), status };
+      return status;
     } catch {
-      return { loggedIn: false };
+      if (version === this.cookieVersion && this.lastAuth && Date.now() - this.lastAuth.at < 15 * 60 * 1000) return this.lastAuth.status;
+      throw new Error("QQ authentication check temporarily unavailable");
     }
   }
 
@@ -977,8 +1040,7 @@ export class QQMusicProvider implements MusicProvider {
 
   async getUserPlaylists(): Promise<Playlist[]> {
     if (!this.cookie) return [];
-    const uinMatch = /(?:^|; )uin=o?0?(\d+)/.exec(this.cookie);
-    const uin = uinMatch ? uinMatch[1] : "";
+    const uin = qqCookieUin(this.cookie);
     if (!uin) return [];
 
     // Created and collected playlists come from two separate QQ endpoints.

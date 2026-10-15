@@ -50,7 +50,7 @@ export function createAuthRouter(
       const { platform } = req.body;
       const provider = getProvider(platform);
       const qr = await provider.getQrCode();
-      logger.info({ platform, key: qr.key }, "QR code generated");
+      logger.info({ platform }, "QR code generated");
       res.json(qr);
     } catch (err) {
       logger.error({ err }, "QR code generation failed");
@@ -67,7 +67,7 @@ export function createAuthRouter(
       }
       const provider = getProvider(platform as string);
       const status = await provider.checkQrCodeStatus(key as string);
-      logger.info({ platform, status, key }, "QR status check");
+      logger.info({ platform, status }, "QR status check");
 
       // When confirmed, persist cookie
       if (status === "confirmed") {
