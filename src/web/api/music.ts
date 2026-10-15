@@ -183,12 +183,15 @@ export function createMusicRouter(
 
   router.get("/search/all", async (req, res) => {
     try {
-      const { q, limit } = req.query;
+      const { q, limit, offset } = req.query;
       if (!q) {
         res.status(400).json({ error: "q (query) is required" });
         return;
       }
       const parsedLimit = parseInt(limit as string) || 20;
+      // Offset is per provider, just as on /search, rather than a slice of the
+      // already merged first page. Invalid/negative values start at page one.
+      const parsedOffset = Math.max(0, parseInt(offset as string) || 0);
       // Spotify is intentionally EXCLUDED from unified /search/all in Stage 1:
       // its tracks are metadata-only (not yet playable) until the librespot audio
       // backend lands (Stage 2/3), so surfacing them in the default all-sources
@@ -200,12 +203,12 @@ export function createMusicRouter(
       const enabled = (p: string) => !config || isProviderEnabled(config, p);
       const none: SearchResult = { songs: [], albums: [], playlists: [] };
       const [jellyfinResult, neteaseResult, qqResult, bilibiliResult, localResult, kugouResult] = await Promise.allSettled([
-        jellyfinProvider && enabled("jellyfin") ? jellyfinProvider.search(q as string, parsedLimit) : Promise.resolve(none),
-        enabled("netease") ? neteaseProvider.search(q as string, parsedLimit) : Promise.resolve(none),
-        enabled("qq") ? qqProvider.search(q as string, parsedLimit) : Promise.resolve(none),
-        enabled("bilibili") ? bilibiliProvider.search(q as string, parsedLimit) : Promise.resolve(none),
-        localProvider && isLocalAudioEnabled() ? localProvider.search(q as string, parsedLimit) : Promise.resolve(none),
-        kugouProvider && enabled("kugou") ? kugouProvider.search(q as string, parsedLimit) : Promise.resolve(none),
+        jellyfinProvider && enabled("jellyfin") ? jellyfinProvider.search(q as string, parsedLimit, parsedOffset) : Promise.resolve(none),
+        enabled("netease") ? neteaseProvider.search(q as string, parsedLimit, parsedOffset) : Promise.resolve(none),
+        enabled("qq") ? qqProvider.search(q as string, parsedLimit, parsedOffset) : Promise.resolve(none),
+        enabled("bilibili") ? bilibiliProvider.search(q as string, parsedLimit, parsedOffset) : Promise.resolve(none),
+        localProvider && isLocalAudioEnabled() ? localProvider.search(q as string, parsedLimit, parsedOffset) : Promise.resolve(none),
+        kugouProvider && enabled("kugou") ? kugouProvider.search(q as string, parsedLimit, parsedOffset) : Promise.resolve(none),
       ]);
 
       const songs = [

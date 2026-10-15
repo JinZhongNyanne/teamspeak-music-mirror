@@ -60,6 +60,88 @@ describe("music router GET /search offset pagination", () => {
   });
 });
 
+describe("music router GET /search/all offset pagination", () => {
+  function mount(config = getDefaultConfig()) {
+    const providers = {
+      jellyfin: fakeProvider("jellyfin"),
+      netease: fakeProvider("netease"),
+      qq: fakeProvider("qq"),
+      bilibili: fakeProvider("bilibili"),
+      local: fakeProvider("local"),
+      kugou: fakeProvider("kugou"),
+      spotify: fakeProvider("spotify"),
+    };
+    const app = express();
+    app.use("/api/music", createMusicRouter(
+      providers.netease, providers.qq, providers.bilibili, pino({ level: "silent" }),
+      providers.local, config, providers.kugou, providers.spotify, providers.jellyfin,
+    ));
+    return { app, providers };
+  }
+
+  function allEnabled() {
+    const config = getDefaultConfig();
+    config.enabledProviders = ["jellyfin", "netease", "qq", "bilibili", "kugou"];
+    config.spotify.enabled = true;
+    return config;
+  }
+
+  it.each([
+    ["&offset=40", 40],
+    ["", 0],
+    ["&offset=-5", 0],
+    ["&offset=invalid", 0],
+  ])("passes the same per-provider offset for %s", async (query, offset) => {
+    const { app, providers } = mount(allEnabled());
+    const res = await request(app).get(`/api/music/search/all?q=hello&limit=20${query}`);
+    expect(res.status).toBe(200);
+    for (const platform of ["jellyfin", "netease", "qq", "bilibili", "local", "kugou"] as const) {
+      expect(providers[platform].search).toHaveBeenCalledExactlyOnceWith("hello", 20, offset);
+    }
+    // Its explicit platform endpoint remains available, but unified search
+    // must not introduce metadata-only Spotify tracks on later pages either.
+    expect(providers.spotify.search).not.toHaveBeenCalled();
+  });
+
+  it("skips disabled sources and local audio on later pages", async () => {
+    const config = allEnabled();
+    config.enabledProviders = ["qq"];
+    config.localAudioEnabled = false;
+    const { app, providers } = mount(config);
+    const res = await request(app).get("/api/music/search/all?q=hello&offset=60");
+    expect(res.status).toBe(200);
+    expect(providers.qq.search).toHaveBeenCalledExactlyOnceWith("hello", 20, 60);
+    for (const platform of ["jellyfin", "netease", "bilibili", "local", "kugou", "spotify"] as const) {
+      expect(providers[platform].search).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps the existing aggregate order and other sources when one paged search fails", async () => {
+    const { app, providers } = mount(allEnabled());
+    for (const [platform, provider] of Object.entries(providers)) {
+      vi.mocked(provider.search).mockResolvedValue({
+        songs: [{ id: platform + "-40", name: platform, artist: "Artist", album: "Album", duration: 180, coverUrl: "", platform: provider.platform }],
+        albums: [{ id: platform + "-album-40", name: platform, artist: "Artist", coverUrl: "", songCount: 1, platform: provider.platform }],
+        playlists: [{ id: platform + "-playlist-40", name: platform, coverUrl: "", songCount: 1, platform: provider.platform }],
+        artists: [{ id: platform + "-artist-40", name: platform, avatarUrl: "", platform: provider.platform }],
+      });
+    }
+    vi.mocked(providers.netease.search).mockRejectedValue(new Error("source offline"));
+    const res = await request(app).get("/api/music/search/all?q=hello&limit=10&offset=40");
+    expect(res.status).toBe(200);
+    expect(res.body.songs.map((s: { id: string }) => s.id)).toEqual([
+      "jellyfin-40", "qq-40", "bilibili-40", "local-40", "kugou-40",
+    ]);
+    expect(res.body.albums.map((s: { id: string }) => s.id)).toEqual(["jellyfin-album-40", "qq-album-40"]);
+    expect(res.body.playlists.map((s: { id: string }) => s.id)).toEqual(["jellyfin-playlist-40", "qq-playlist-40"]);
+    expect(res.body.artists.map((s: { id: string }) => s.id)).toEqual(["qq-artist-40"]);
+    for (const platform of ["jellyfin", "netease", "qq", "bilibili", "local", "kugou"] as const) {
+      expect(providers[platform].search).toHaveBeenCalledExactlyOnceWith("hello", 10, 40);
+    }
+    expect(providers.spotify.search).not.toHaveBeenCalled();
+  });
+});
+
 describe("music router provider gating (enabledProviders) + jellyfin endpoints", () => {
   function jellyfinFake(): MusicProvider {
     return {
