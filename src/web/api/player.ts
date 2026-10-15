@@ -312,6 +312,56 @@ export function createPlayerRouter(
     }
   });
 
+  // The legacy /playlist executes !playlist, which replaces playback. Keep an
+  // explicit append route so clients never mistake that command for queueing.
+  router.post("/:botId/append-playlist", authorize({ capability: "player.queue" }), async (req, res) => {
+    try {
+      const bot = (req as any).bot;
+      const { playlistId, platform } = req.body ?? {};
+      if (typeof playlistId !== "string" || !playlistId.trim()) {
+        res.status(400).json({ error: "playlistId is required" });
+        return;
+      }
+      if (isLocalAudioDisabled(bot, platform)) {
+        rejectDisabledLocalAudio(res);
+        return;
+      }
+      const provider = bot.getProviderFor(
+        platform === "bilibili" || platform === "qq" || platform === "youtube" || platform === "local" || platform === "kugou" || platform === "jellyfin" || platform === "spotify"
+          ? platform
+          : "netease"
+      );
+      // Read the provider before changing anything: a failed/empty playlist
+      // must leave the queue, current song, pause state and FM untouched.
+      const songs = await provider.getPlaylistSongs(playlistId);
+      if (songs.length === 0) {
+        res.json({ ok: false, message: "Playlist is empty or not found", added: 0 });
+        return;
+      }
+      const body = await bot.runExclusive(async () => {
+        const queue = bot.getQueueManager();
+        const firstAdded = queue.size();
+        const wasIdle = bot.getPlayer().getState() === "idle" && !bot.getStatus().paused;
+        for (const song of songs) {
+          queue.add({ ...song, platform: provider.platform, requestedBy: requesterName(req) });
+        }
+        // Match add-song's idle behavior without interrupting playing/paused
+        // audio or resetting the current position, shuffle mode or FM state.
+        if (wasIdle) {
+          queue.playAt(firstAdded);
+          bot.getPlayer().resetFailures();
+          await bot.resolveAndPlay(queue.current()!);
+        }
+        bot.emit("stateChange");
+        return { ok: true, message: `已追加 ${songs.length} 首歌曲到队列`, added: songs.length };
+      });
+      res.json(body);
+    } catch (err) {
+      logger.error({ err }, "Append playlist failed");
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   router.post("/:botId/playlist", authorize({ capability: "player.queue" }), async (req, res) => {
     try {
       const bot = (req as any).bot;
