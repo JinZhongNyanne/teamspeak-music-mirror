@@ -188,6 +188,9 @@ export class QQMusicProvider implements MusicProvider {
   private cookie = "";
   private quality = "exhigh";
   private radarPage = 1;
+  private recommendOffset = 0;
+  private recommendNextOffset = 0;
+  private recommendPending: { version: number; task: Promise<Playlist[]> } | null = null;
   private persistCookie: ((cookie: string) => void) | null = null;
   private refreshPending: { cookie: string; task: Promise<boolean> } | null = null;
   private nextRefreshAt = 0;
@@ -590,17 +593,61 @@ export class QQMusicProvider implements MusicProvider {
     };
   }
 
-  async getRecommendPlaylists(): Promise<Playlist[]> {
-    const res = await this.api.get("/getSongLists", {
-      params: { categoryId: 10000000, pageSize: 10, ...this.cookieParams },
-    });
-    return (res.data?.response?.data?.list ?? []).map((p: any) => ({
-      id: String(p.dissid),
-      name: p.dissname ?? "",
-      coverUrl: p.imgurl ?? "",
-      songCount: p.listennum ?? 0,
-      platform: "qq",
-    }));
+  async getRecommendPlaylists(refresh = false): Promise<Playlist[]> {
+    const version = this.cookieVersion;
+    if (this.recommendPending?.version === version) return this.recommendPending.task;
+    // The old category feed always returned the same first page (and ignored
+    // pageSize). Ask the recommendation feed for an explicit cursor instead.
+    // Protocol: QQMusicApi/qqmusic_api/modules/recommend.py get_recommend_songlist.
+    let offset = refresh ? this.recommendNextOffset : this.recommendOffset;
+    const task = (async (): Promise<Playlist[]> => {
+      try {
+        const requestPage = (from: number) => qqMusicuApi.post(
+          "/cgi-bin/musicu.fcg",
+          this.buildMusicuPayload("music.playlist.PlaylistSquare", "GetRecommendFeed", { From: from, Size: 20 }),
+          { headers: { referer: "https://y.qq.com/", ...this.directCookieHeaders } }
+        );
+        let body = (await requestPage(offset)).data;
+        // The feed may shrink between requests. Recover a stale end cursor
+        // with one bounded first-page request, rather than staying stuck.
+        if (offset > 0 && body?.code === 0 && body?.req_0?.code === 0
+          && Array.isArray(body?.req_0?.data?.List) && body.req_0.data.List.length === 0) {
+          offset = 0;
+          body = (await requestPage(0)).data;
+        }
+        const data = body?.req_0?.data;
+        if (body?.code !== 0 || body?.req_0?.code !== 0 || !Array.isArray(data?.List)) {
+          throw new Error("Invalid QQ recommendation response");
+        }
+        const playlists: Playlist[] = data.List.map((item: any) => {
+          const basic = item?.Playlist?.basic;
+          if (!basic || (typeof basic.tid !== "string" && typeof basic.tid !== "number")
+            || !/^[1-9]\d*$/.test(String(basic.tid)) || (typeof basic.tid === "number" && !Number.isSafeInteger(basic.tid))
+            || typeof basic.title !== "string" || !basic.title) {
+            throw new Error("Invalid QQ recommendation entry");
+          }
+          return {
+            id: String(basic.tid), name: basic.title,
+            coverUrl: httpsImage(basic.cover?.medium_url || basic.cover?.big_url || basic.cover?.small_url || basic.cover?.default_url),
+            songCount: Number(basic.song_cnt) || 0, platform: "qq" as const,
+          };
+        });
+        if (!playlists.length) throw new Error("Empty QQ recommendation page");
+        if (version !== this.cookieVersion) throw new Error("QQ account changed during recommendation lookup");
+        const next = Number(data.FromLimit);
+        this.recommendOffset = offset;
+        this.recommendNextOffset = data.HasMore === false || data.HasMore === 0 ? 0
+          : Number.isSafeInteger(next) && next > offset ? next : offset + playlists.length;
+        return playlists;
+      } catch {
+        // No cursor advance or empty-list replacement on a transient failure.
+        // Never surface credential-bearing Axios errors to logs or the client.
+        throw new Error("QQ 推荐歌单暂时无法刷新，请稍后重试");
+      }
+    })();
+    this.recommendPending = { version, task };
+    try { return await task; }
+    finally { if (this.recommendPending?.task === task) this.recommendPending = null; }
   }
 
   async getAlbumSongs(albumId: string): Promise<Song[]> {
@@ -905,6 +952,8 @@ export class QQMusicProvider implements MusicProvider {
     // Reset radar pagination so a re-login (different account) starts from the
     // first page rather than inheriting the previous account's cursor.
     this.radarPage = 1;
+    this.recommendOffset = 0;
+    this.recommendNextOffset = 0;
   }
 
   getCookie(): string {

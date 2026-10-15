@@ -165,6 +165,16 @@
       <h2 class="section-title">
         推荐歌单
         <SourceTabs :model-value="recommendSourceSafe" @update:model-value="recommendSource = $event" :sources="recommendAvailable" />
+        <button
+          type="button"
+          class="refresh-recommendations-btn"
+          :disabled="store.refreshingRecommendations[recommendSourceSafe]"
+          :aria-busy="store.refreshingRecommendations[recommendSourceSafe]"
+          @click="store.refreshRecommendPlaylists(recommendSourceSafe)"
+        >
+          <Icon icon="mdi:refresh" />
+          {{ store.refreshingRecommendations[recommendSourceSafe] ? '加载中…' : '换一批' }}
+        </button>
       </h2>
       <div class="playlist-grid">
         <RouterLink
@@ -408,6 +418,23 @@ onMounted(() => {
     background: var(--hover-bg);
     color: var(--color-primary);
   }
+}
+
+.refresh-recommendations-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+
+  &:hover:not(:disabled) { background: var(--hover-bg); }
+  &:disabled { opacity: 0.5; cursor: wait; }
 }
 
 .bili-badge {

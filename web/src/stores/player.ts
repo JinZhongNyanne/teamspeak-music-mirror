@@ -151,6 +151,7 @@ export const usePlayerStore = defineStore('player', {
 
     // Home page cache, split by source
     recommendPlaylists: { netease: [] as PlaylistItem[], qq: [] as PlaylistItem[], kugou: [] as PlaylistItem[], spotify: [] as PlaylistItem[] },
+    refreshingRecommendations: { netease: false, qq: false, kugou: false, spotify: false },
     dailySongs:         { netease: [] as Song[],         qq: [] as Song[],         kugou: [] as Song[], spotify: [] as Song[] },
     userPlaylists:      { jellyfin: [] as PlaylistItem[], netease: [] as PlaylistItem[], qq: [] as PlaylistItem[], kugou: [] as PlaylistItem[], spotify: [] as PlaylistItem[] },
     bilibiliPopular: [] as Song[],
@@ -819,6 +820,21 @@ export const usePlayerStore = defineStore('player', {
         if (typeof res.data.default === 'string') this.defaultSource = res.data.default;
       } catch {
         // keep previous values (backend briefly unavailable)
+      }
+    },
+
+    async refreshRecommendPlaylists(source: Exclude<Source, 'jellyfin'>) {
+      if (this.refreshingRecommendations[source]) return;
+      this.refreshingRecommendations[source] = true;
+      try {
+        const res = await axios.get('/api/music/recommend/playlists', {
+          params: { platform: source, refresh: '1' },
+        });
+        this.recommendPlaylists[source] = res.data.playlists ?? [];
+      } catch {
+        this.notify('推荐歌单刷新失败，请稍后重试', 'error');
+      } finally {
+        this.refreshingRecommendations[source] = false;
       }
     },
 

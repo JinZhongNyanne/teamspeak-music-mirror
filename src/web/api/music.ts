@@ -271,10 +271,11 @@ export function createMusicRouter(
   });
 
   router.get("/recommend/playlists", async (req, res) => {
+    res.set("Cache-Control", "no-store");
     try {
       const provider = resolveProvider(req.query.platform, res);
       if (!provider) return;
-      const playlists = await provider.getRecommendPlaylists();
+      const playlists = await provider.getRecommendPlaylists(req.query.refresh === "1");
       res.json({ playlists });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
