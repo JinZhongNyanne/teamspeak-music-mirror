@@ -152,6 +152,7 @@ export const usePlayerStore = defineStore('player', {
     // Home page cache, split by source
     recommendPlaylists: { netease: [] as PlaylistItem[], qq: [] as PlaylistItem[], kugou: [] as PlaylistItem[], spotify: [] as PlaylistItem[] },
     refreshingRecommendations: { netease: false, qq: false, kugou: false, spotify: false },
+    recommendationVersions: { netease: 0, qq: 0, kugou: 0, spotify: 0 },
     dailySongs:         { netease: [] as Song[],         qq: [] as Song[],         kugou: [] as Song[], spotify: [] as Song[] },
     userPlaylists:      { jellyfin: [] as PlaylistItem[], netease: [] as PlaylistItem[], qq: [] as PlaylistItem[], kugou: [] as PlaylistItem[], spotify: [] as PlaylistItem[] },
     bilibiliPopular: [] as Song[],
@@ -825,6 +826,7 @@ export const usePlayerStore = defineStore('player', {
 
     async refreshRecommendPlaylists(source: Exclude<Source, 'jellyfin'>) {
       if (this.refreshingRecommendations[source]) return;
+      this.recommendationVersions[source]++;
       this.refreshingRecommendations[source] = true;
       try {
         const res = await axios.get('/api/music/recommend/playlists', {
@@ -839,6 +841,9 @@ export const usePlayerStore = defineStore('player', {
     },
 
     async fetchHomeData() {
+      // A manual refresh owns its section even if an older home request is
+      // still waiting for unrelated providers (or the manual refresh fails).
+      const recommendationVersions = { ...this.recommendationVersions };
       // The provider gate decides which sources to even ask about — disabled
       // sources are skipped entirely (their sidecars may not be running).
       await this.fetchProviders();
@@ -978,20 +983,26 @@ export const usePlayerStore = defineStore('player', {
       this.userPlaylists.jellyfin =
         jfUserPL.status === 'fulfilled' ? (jfUserPL.value.data.playlists ?? []) : [];
 
-      this.recommendPlaylists.netease =
-        neRecPL.status === 'fulfilled' ? (neRecPL.value.data.playlists ?? []) : [];
+      if (recommendationVersions.netease === this.recommendationVersions.netease) {
+        this.recommendPlaylists.netease =
+          neRecPL.status === 'fulfilled' ? (neRecPL.value.data.playlists ?? []) : [];
+      }
       this.dailySongs.netease =
         neDaily.status === 'fulfilled' ? (neDaily.value.data.songs ?? []) : [];
       this.userPlaylists.netease =
         neUserPL.status === 'fulfilled' ? (neUserPL.value.data.playlists ?? []) : [];
-      this.recommendPlaylists.qq =
-        qqRecPL.status === 'fulfilled' ? (qqRecPL.value.data.playlists ?? []) : [];
+      if (recommendationVersions.qq === this.recommendationVersions.qq) {
+        this.recommendPlaylists.qq =
+          qqRecPL.status === 'fulfilled' ? (qqRecPL.value.data.playlists ?? []) : [];
+      }
       this.dailySongs.qq =
         qqDaily.status === 'fulfilled' ? (qqDaily.value.data.songs ?? []) : [];
       this.userPlaylists.qq =
         qqUserPL.status === 'fulfilled' ? (qqUserPL.value.data.playlists ?? []) : [];
-      this.recommendPlaylists.kugou =
-        kgRecPL.status === 'fulfilled' ? (kgRecPL.value.data.playlists ?? []) : [];
+      if (recommendationVersions.kugou === this.recommendationVersions.kugou) {
+        this.recommendPlaylists.kugou =
+          kgRecPL.status === 'fulfilled' ? (kgRecPL.value.data.playlists ?? []) : [];
+      }
       this.dailySongs.kugou =
         kgDaily.status === 'fulfilled' ? (kgDaily.value.data.songs ?? []) : [];
       this.userPlaylists.kugou =

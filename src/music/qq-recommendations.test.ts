@@ -114,6 +114,25 @@ describe("QQ recommendation feed", () => {
     resolve(response());
     expect(await one).toEqual(await two);
   });
+  it("does not swallow an explicit refresh during an ordinary read", async () => {
+    const p = new QQMusicProvider("http://fixture");
+    let resolve!: (value: unknown) => void;
+    post
+      .mockReturnValueOnce(
+        new Promise((r) => {
+          resolve = r;
+        }),
+      )
+      .mockResolvedValueOnce(response("456", 40));
+    const initial = p.getRecommendPlaylists();
+    const firstClick = p.getRecommendPlaylists(true);
+    const secondClick = p.getRecommendPlaylists(true);
+    resolve(response());
+    expect((await initial)[0].id).toBe("123");
+    expect((await firstClick)[0].id).toBe("456");
+    expect(await secondClick).toEqual(await firstClick);
+    expect(offsets()).toEqual([0, 20]);
+  });
   it("resets pagination on login and ignores the old account's response", async () => {
     const p = new QQMusicProvider("http://fixture");
     p.setCookie("uin=12345; qqmusic_key=old");

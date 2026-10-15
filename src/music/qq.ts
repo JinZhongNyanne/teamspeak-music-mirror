@@ -190,7 +190,7 @@ export class QQMusicProvider implements MusicProvider {
   private radarPage = 1;
   private recommendOffset = 0;
   private recommendNextOffset = 0;
-  private recommendPending: { version: number; task: Promise<Playlist[]> } | null = null;
+  private recommendPending: { version: number; refresh: boolean; task: Promise<Playlist[]> } | null = null;
   private persistCookie: ((cookie: string) => void) | null = null;
   private refreshPending: { cookie: string; task: Promise<boolean> } | null = null;
   private nextRefreshAt = 0;
@@ -595,7 +595,14 @@ export class QQMusicProvider implements MusicProvider {
 
   async getRecommendPlaylists(refresh = false): Promise<Playlist[]> {
     const version = this.cookieVersion;
-    if (this.recommendPending?.version === version) return this.recommendPending.task;
+    if (this.recommendPending?.version === version) {
+      const pending = this.recommendPending;
+      if (!refresh || pending.refresh) return pending.task;
+      // A refresh arriving during an ordinary home read still means "next
+      // batch". Wait for its cursor, then coalesce with any other refresh.
+      await pending.task;
+      return this.getRecommendPlaylists(true);
+    }
     // The old category feed always returned the same first page (and ignored
     // pageSize). Ask the recommendation feed for an explicit cursor instead.
     // Protocol: QQMusicApi/qqmusic_api/modules/recommend.py get_recommend_songlist.
@@ -645,7 +652,7 @@ export class QQMusicProvider implements MusicProvider {
         throw new Error("QQ 推荐歌单暂时无法刷新，请稍后重试");
       }
     })();
-    this.recommendPending = { version, task };
+    this.recommendPending = { version, refresh, task };
     try { return await task; }
     finally { if (this.recommendPending?.task === task) this.recommendPending = null; }
   }

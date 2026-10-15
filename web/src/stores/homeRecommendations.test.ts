@@ -11,6 +11,52 @@ beforeEach(() => setActivePinia(createPinia()));
 afterEach(() => vi.restoreAllMocks());
 
 describe('refreshRecommendPlaylists', () => {
+  for (const source of ['netease', 'qq', 'kugou'] as const) {
+    it.each([
+      { homeFails: false, refreshFails: false },
+      { homeFails: true, refreshFails: false },
+      { homeFails: false, refreshFails: true },
+      { homeFails: true, refreshFails: true },
+    ])(`protects ${source} from an older home response (home failure: $homeFails, refresh failure: $refreshFails)`, async ({ homeFails, refreshFails }) => {
+      const store = usePlayerStore();
+      store.enabledProviders = [source];
+      store.authStatus[source] = true;
+      store.recommendPlaylists[source] = [playlist('visible', source)];
+      vi.spyOn(store, 'fetchProviders').mockResolvedValue();
+      vi.spyOn(store, 'fetchFavorites').mockResolvedValue();
+      let releaseHome!: () => void;
+      const delayedSongs = new Promise<{ data: { songs: never[] } }>((resolve) => {
+        releaseHome = () => resolve({ data: { songs: [] } });
+      });
+      let homeStarted!: () => void;
+      const started = new Promise<void>((resolve) => { homeStarted = resolve; });
+      vi.spyOn(axios, 'get').mockImplementation((url, config) => {
+        if (url === '/api/auth/status') return Promise.resolve({ data: { loggedIn: true } });
+        if (url === '/api/music/recommend/songs') {
+          homeStarted();
+          return delayedSongs;
+        }
+        if (url === '/api/music/recommend/playlists') {
+          const manual = config?.params?.refresh === '1';
+          if (manual ? refreshFails : homeFails) return Promise.reject(new Error('network'));
+          return Promise.resolve({ data: { playlists: [playlist(manual ? 'new-batch' : 'stale-home', source)] } });
+        }
+        return Promise.resolve({ data: { playlists: [] } });
+      });
+
+      const home = store.fetchHomeData();
+      await started;
+      await store.refreshRecommendPlaylists(source);
+      const expected = [playlist(refreshFails ? 'visible' : 'new-batch', source)];
+      expect(store.recommendPlaylists[source]).toEqual(expected);
+      releaseHome();
+      await home;
+
+      expect(store.recommendPlaylists[source]).toEqual(expected);
+      expect(store.refreshingRecommendations[source]).toBe(false);
+    });
+  }
+
   it('requests a new batch despite a fresh home cache and replaces only the selected section', async () => {
     const store = usePlayerStore();
     const old = playlist('old');
