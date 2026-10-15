@@ -156,6 +156,8 @@ export interface BotStatus {
   elapsed: number; // ground truth elapsed seconds from frame count
   /** 当前曲实际播放时长（秒）。试听片段=试听秒数；完整曲=duration。缺失时前端回退 currentSong.duration。 */
   effectiveDuration?: number;
+  /** FM provider, independent of the current song's source; null when inactive. */
+  fmPlatform?: string | null;
 }
 
 export class BotInstance extends EventEmitter {
@@ -2400,6 +2402,7 @@ export class BotInstance extends EventEmitter {
       playMode: this.queue.getMode(),
       elapsed: this.player.getElapsed(),
       effectiveDuration: this.effectiveDuration,
+      fmPlatform: this.isFmMode && this.fmProvider ? this.fmProvider.platform : null,
     };
   }
 
