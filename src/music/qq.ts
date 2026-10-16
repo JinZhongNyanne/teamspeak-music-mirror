@@ -604,7 +604,7 @@ export class QQMusicProvider implements MusicProvider {
       return this.getRecommendPlaylists(true);
     }
     // The old category feed always returned the same first page (and ignored
-    // pageSize). Ask the recommendation feed for an explicit cursor instead.
+    // pageSize). Request successive offsets from the recommendation feed.
     // Protocol: QQMusicApi/qqmusic_api/modules/recommend.py get_recommend_songlist.
     let offset = refresh ? this.recommendNextOffset : this.recommendOffset;
     const task = (async (): Promise<Playlist[]> => {
@@ -618,7 +618,8 @@ export class QQMusicProvider implements MusicProvider {
         // The feed may shrink between requests. Recover a stale end cursor
         // with one bounded first-page request, rather than staying stuck.
         if (offset > 0 && body?.code === 0 && body?.req_0?.code === 0
-          && Array.isArray(body?.req_0?.data?.List) && body.req_0.data.List.length === 0) {
+          && (body?.req_0?.data?.List === null
+            || (Array.isArray(body?.req_0?.data?.List) && body.req_0.data.List.length === 0))) {
           offset = 0;
           body = (await requestPage(0)).data;
         }
@@ -641,10 +642,13 @@ export class QQMusicProvider implements MusicProvider {
         });
         if (!playlists.length) throw new Error("Empty QQ recommendation page");
         if (version !== this.cookieVersion) throw new Error("QQ account changed during recommendation lookup");
-        const next = Number(data.FromLimit);
+        // Live QQ responses use FromLimit as the last allowed offset (400),
+        // not the next cursor. HasMore can already be false at From=40 while
+        // later pages through From=400 still contain different playlists.
+        const next = offset + 20;
+        const limit = data.FromLimit;
         this.recommendOffset = offset;
-        this.recommendNextOffset = data.HasMore === false || data.HasMore === 0 ? 0
-          : Number.isSafeInteger(next) && next > offset ? next : offset + playlists.length;
+        this.recommendNextOffset = Number.isSafeInteger(limit) && limit >= 0 && next > limit ? 0 : next;
         return playlists;
       } catch {
         // No cursor advance or empty-list replacement on a transient failure.
