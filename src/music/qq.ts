@@ -246,7 +246,7 @@ export class QQMusicProvider implements MusicProvider {
         this.persistCookie?.(renewed);
         this.cookie = renewed;
         this.cookieVersion++;
-        this.nextRefreshAt = Date.now() + 12 * 60 * 60 * 1000;
+        this.nextRefreshAt = Date.now() + 24 * 60 * 60 * 1000;
         return true;
       } catch (err) {
         // Axios errors can include a credential-bearing request. Log only the

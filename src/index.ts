@@ -90,8 +90,9 @@ async function main() {
   });
   if (qqCookie) qqProvider.setCookie(qqCookie);
   // The music key expires independently from the longer-lived QQ access token.
-  // Check once at boot and hourly, with provider-side due/backoff/single-flight
-  // guards; waiting for the settings page to be opened can miss the renewal.
+  // Refresh at a 24-hour cadence. The hourly wake-up only retries failures;
+  // provider-side due/backoff/single-flight guards suppress QQ requests that
+  // are not due, so a healthy credential makes at most one request per day.
   const renewQqCookie = () => {
     if (isProviderEnabled(config, "qq")) void qqProvider.refreshCookie();
   };

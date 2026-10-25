@@ -105,10 +105,11 @@ describe("QQ cookie renewal helpers", () => {
     },
   );
 
-  it("renews after twelve hours, before access expiry, and when creation is unknown", () => {
+  it("renews after twenty-four hours, before access expiry, and when creation is unknown", () => {
     expect(isQqRefreshDue(cookie, now)).toBe(false);
-    expect(isQqRefreshDue(cookie, now + 12 * 3600000 - 1)).toBe(false);
-    expect(isQqRefreshDue(cookie, now + 12 * 3600000)).toBe(true);
+    expect(isQqRefreshDue(cookie, now + 12 * 3600000)).toBe(false);
+    expect(isQqRefreshDue(cookie, now + 24 * 3600000 - 1)).toBe(false);
+    expect(isQqRefreshDue(cookie, now + 24 * 3600000)).toBe(true);
     expect(
       isQqRefreshDue(
         cookie + `; psrf_access_token_expiresAt=${seconds + 86400}`,

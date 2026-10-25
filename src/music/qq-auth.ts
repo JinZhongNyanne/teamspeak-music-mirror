@@ -57,7 +57,7 @@ export function isQqRefreshDue(cookie: string, nowMs: number): boolean {
   const now = nowMs / 1000;
   return (
     created === null ||
-    now - created >= 12 * 60 * 60 ||
+    now - created >= 24 * 60 * 60 ||
     (expires !== null && expires - now <= 24 * 60 * 60)
   );
 }
