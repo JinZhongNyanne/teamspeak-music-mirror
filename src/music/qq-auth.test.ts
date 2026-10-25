@@ -55,18 +55,30 @@ describe("QQ cookie renewal helpers", () => {
           openid: "fake-open",
           access_token: "fake-access",
           refresh_token: "fake-refresh",
-          expired_in: seconds + 7 * 86400,
-          musicid: "12345",
+          expired_in: 90 * 24 * 60 * 60,
+          musicid: 12345,
+          str_musicid: "12345",
           musickey: "old-key",
+          unionid: "",
           refresh_key: "",
           loginMode: 2,
         },
       },
     });
     const request = buildQqRefreshRequest(
-      cookie + "; psrf_qqrefresh_key=optional-key",
+      cookie +
+        "; psrf_qqrefresh_key=optional-key; psrf_qqunionid=optional-union",
     ) as any;
     expect(request.req_0.param.refresh_key).toBe("optional-key");
+    expect(request.req_0.param.unionid).toBe("optional-union");
+  });
+
+  it("sends a refresh duration and a numeric music id", () => {
+    const request = buildQqRefreshRequest(cookie) as any;
+    expect(request.req_0.param.expired_in).toBe(90 * 24 * 60 * 60);
+    expect(request.req_0.param.musicid).toBe(12345);
+    expect(request.req_0.param.str_musicid).toBe("12345");
+    expect(request.req_0.param.expired_in).not.toBe(seconds + 7 * 86400);
   });
 
   it.each([

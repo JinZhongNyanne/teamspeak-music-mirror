@@ -15,6 +15,7 @@ import type {
   ArtistSongPage,
 } from "./provider.js";
 import { parseLyrics } from "./netease.js";
+import type { Logger } from "../logger.js";
 import { buildQqRefreshRequest, isQqRefreshDue, mergeQqRefreshResponse, parseQqCookie, qqCookieUin } from "./qq-auth.js";
 
 // Primary search client: u.y.qq.com/cgi-bin/musicu.fcg (JSON sub-request
@@ -197,7 +198,7 @@ export class QQMusicProvider implements MusicProvider {
   private cookieVersion = 0;
   private lastAuth: { at: number; status: AuthStatus } | null = null;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, private readonly logger?: Logger) {
     this.api = axios.create({
       baseURL: baseUrl,
       timeout: 10000,
@@ -231,17 +232,30 @@ export class QQMusicProvider implements MusicProvider {
         const response = await qqMusicuApi.post("/cgi-bin/musicu.fcg", payload, {
           headers: { referer: "https://y.qq.com/", Cookie: cookie },
         });
-        const renewed = mergeQqRefreshResponse(cookie, response.data, Date.now());
-        if (!renewed || this.cookieVersion !== version) return false;
+        const body = response.data as any;
+        const renewed = mergeQqRefreshResponse(cookie, body, Date.now());
+        if (!renewed) {
+          this.logger?.warn(
+            { platform: "qq", code: body?.req_0?.code ?? body?.code ?? null },
+            "QQ cookie renewal rejected",
+          );
+          return false;
+        }
+        if (this.cookieVersion !== version) return false;
         // Persist first: a successful renewal must survive the next restart.
         this.persistCookie?.(renewed);
         this.cookie = renewed;
         this.cookieVersion++;
         this.nextRefreshAt = Date.now() + 12 * 60 * 60 * 1000;
         return true;
-      } catch {
-        // Axios errors can include a credential-bearing request. Do not expose
-        // them to logs or callers; retain the old cookie and retry later.
+      } catch (err) {
+        // Axios errors can include a credential-bearing request. Log only the
+        // upstream business code, never the error object or request metadata.
+        const data = (err as any)?.response?.data;
+        this.logger?.warn(
+          { platform: "qq", code: data?.req_0?.code ?? data?.code ?? null },
+          "QQ cookie renewal failed",
+        );
         return false;
       }
     })();

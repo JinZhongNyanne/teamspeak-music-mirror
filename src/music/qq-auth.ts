@@ -88,6 +88,14 @@ export function buildQqRefreshRequest(
   )
     return null;
   const gtk = qqGtk(musicKey);
+  // QQ treats expired_in as a duration in seconds, not an absolute timestamp.
+  // Sending the cookie's Unix expiry (≈57 years) is rejected with req_0 code
+  // 10006 even while the refresh token is still valid. 90 days matches what
+  // the current endpoint returns for a successful renewal.
+  const expiredIn = 90 * 24 * 60 * 60;
+  const numericUin = /^\d+$/.test(uin) && Number.isSafeInteger(Number(uin))
+    ? Number(uin)
+    : uin;
   return {
     comm: {
       ct: 24,
@@ -111,9 +119,11 @@ export function buildQqRefreshRequest(
         openid: fields.psrf_qqopenid,
         access_token: fields.psrf_qqaccess_token,
         refresh_token: fields.psrf_qqrefresh_token,
-        expired_in: unixSeconds(fields.psrf_access_token_expiresAt) ?? 0,
-        musicid: uin,
+        expired_in: expiredIn,
+        musicid: numericUin,
+        str_musicid: uin,
         musickey: musicKey,
+        unionid: fields.psrf_qqunionid || "",
         refresh_key: fields.psrf_qqrefresh_key || fields.refresh_key || "",
         loginMode: 2,
       },

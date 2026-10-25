@@ -106,6 +106,18 @@ describe("QQ credential renewal", () => {
     expect(await p.refreshCookie()).toBe(false);
     expect(p.getCookie()).toBe(old);
   });
+  it("logs only a sanitized upstream code when renewal is rejected", async () => {
+    const logger = { warn: vi.fn() } as any;
+    const p = new QQMusicProvider("http://fixture", logger);
+    p.setCookie(cookie());
+    post.mockResolvedValue({ data: { code: 0, req_0: { code: 10006 } } });
+    expect(await p.refreshCookie()).toBe(false);
+    expect(logger.warn).toHaveBeenCalledWith(
+      { platform: "qq", code: 10006 },
+      "QQ cookie renewal rejected",
+    );
+    expect(logger.warn.mock.calls[0][0]).not.toHaveProperty("cookie");
+  });
   it("uses renewed credentials for playback requests", async () => {
     const p = new QQMusicProvider("http://fixture");
     p.setCookie(cookie());
