@@ -76,8 +76,12 @@ describe("QQ credential renewal", () => {
     await p.refreshCookie();
     expect(post).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(3600000);
+    expect(await p.refreshCookie()).toBe(false);
+    expect(post).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(5 * 3600000);
     post.mockResolvedValue({ data: { code: 0, req_0: { code: 0, data: {} } } });
     expect(await p.refreshCookie()).toBe(false);
+    expect(post).toHaveBeenCalledTimes(2);
     expect(p.getCookie()).toBe(old);
   });
   it("cannot overwrite a newer manual login, including same-cookie reimport", async () => {

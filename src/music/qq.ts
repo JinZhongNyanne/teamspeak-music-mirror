@@ -235,6 +235,9 @@ export class QQMusicProvider implements MusicProvider {
         const body = response.data as any;
         const renewed = mergeQqRefreshResponse(cookie, body, Date.now());
         if (!renewed) {
+          // Back off for six hours so a rejected token cannot hammer QQ into a
+          // rate-limit response while the music key still has days of life.
+          this.nextRefreshAt = Date.now() + 6 * 60 * 60 * 1000;
           this.logger?.warn(
             { platform: "qq", code: body?.req_0?.code ?? body?.code ?? null },
             "QQ cookie renewal rejected",
@@ -252,6 +255,7 @@ export class QQMusicProvider implements MusicProvider {
         // Axios errors can include a credential-bearing request. Log only the
         // upstream business code, never the error object or request metadata.
         const data = (err as any)?.response?.data;
+        this.nextRefreshAt = Date.now() + 6 * 60 * 60 * 1000;
         this.logger?.warn(
           { platform: "qq", code: data?.req_0?.code ?? data?.code ?? null },
           "QQ cookie renewal failed",
